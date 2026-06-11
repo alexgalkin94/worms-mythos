@@ -536,6 +536,8 @@ class Game:
                 self.phase = Game.PH_ACTIVE
         elif self.phase == Game.PH_ACTIVE:
             self.turn_timer -= 1
+            if self.turn_timer in (300, 240, 180, 120, 60):
+                self.fx_event("clock", self.world.w / 2, 10, 1)
             # classic rule: taking real damage ends your turn (the small
             # threshold lets you survive a lick of flame without losing it)
             if active is None or not active.alive or self.turn_timer <= 0 or \

@@ -463,6 +463,12 @@ class Renderer:
         for c in game.crates:
             x, y = int(c.x), int(c.y)
             if not c.landed:
+                beam = pygame.Surface((5, GRID_H), pygame.SRCALPHA)
+                beam.fill((255, 230, 140, 16))
+                v.blit(beam, (x - 2, 0))
+                if (self._t // 12) % 2:
+                    pygame.draw.line(v, (255, 230, 140), (x, y + 6),
+                                     (x, y + 12), 1)
                 pygame.draw.arc(v, (240, 240, 240), (x - 6, y - 12, 12, 10),
                                 0, math.pi, 1)
                 pygame.draw.line(v, (180, 180, 180), (x - 5, y - 7), (x, y - 2))
@@ -491,11 +497,16 @@ class Renderer:
         cx = GRID_W // 2
         pygame.draw.rect(v, (16, 16, 26), (cx - 36, 4, 72, 7))
         pygame.draw.rect(v, (90, 90, 120), (cx - 36, 4, 72, 7), 1)
-        wpix = int(game.wind * 33)
-        if wpix >= 0:
-            pygame.draw.rect(v, (120, 200, 255), (cx + 1, 6, wpix, 3))
-        else:
-            pygame.draw.rect(v, (255, 160, 90), (cx + 1 + wpix, 6, -wpix, 3))
+        n_chev = min(6, int(abs(game.wind) * 6.5) + (1 if game.wind else 0))
+        wdir = 1 if game.wind >= 0 else -1
+        ccol = (120, 200, 255) if wdir > 0 else (255, 160, 90)
+        for k in range(n_chev):
+            bx = cx + wdir * (4 + k * 5)
+            anim = (self._t // 6 + k) % 4
+            if anim == 3:
+                continue
+            pygame.draw.line(v, ccol, (bx, 5), (bx + wdir * 2, 7), 1)
+            pygame.draw.line(v, ccol, (bx, 9), (bx + wdir * 2, 7), 1)
         wl = self.font.render("WIND", True, (140, 140, 170))
         v.blit(wl, (cx - wl.get_width() // 2, 12))
         # timer
@@ -545,6 +556,20 @@ class Renderer:
             pygame.draw.rect(v, (20, 20, 30), (4, GRID_H - 26, 84, 8))
             pygame.draw.rect(v, (255, int(220 - p * 160), 60),
                              (5, GRID_H - 25, int(82 * p), 6))
+        # retreat countdown
+        if game.phase == Game.PH_RETREAT:
+            secs = max(0, game.phase_t) / 60
+            rt = self.font_out.render(f"RETREAT! {secs:.1f}", True,
+                                      (255, 200, 90))
+            v.blit(rt, (GRID_W // 2 - rt.get_width() // 2, 22))
+        # sudden death heads-up in the final minute
+        ttl_sd = game.sd_at - game.tick
+        if not game.sudden_death and 0 < ttl_sd < 3600 and \
+                (self._t // 40) % 2:
+            sd = self.font_out.render(
+                f"SUDDEN DEATH IN {ttl_sd // 60 // 60 + 1}", True,
+                (255, 140, 90))
+            v.blit(sd, (GRID_W // 2 - sd.get_width() // 2, 30))
         # banner
         if game.phase in (Game.PH_START,) and game.banner:
             b = self.font_big.render(game.banner, True, (255, 255, 255))
@@ -665,4 +690,8 @@ class Renderer:
                 audio.play("thud", 0.6)
             elif kind == "bubble":
                 audio.play("bubble", 0.3)
+            elif kind == "clock":
+                audio.play("tic", 0.7)
+            elif kind == "crate":
+                audio.play("pickup", 0.35)
         game.fx.clear()
