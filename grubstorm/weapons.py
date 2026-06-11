@@ -570,6 +570,7 @@ def fire_transmuter(game, grub, angle, power, click):
         return False
     cx, cy = click
     if math.hypot(cx - grub.x, cy - grub.y) > 110:
+        game.toast(cx, cy, "OUT OF RANGE")
         game.fx_event("tic", grub.x, grub.y, 1)
         return False
     w = game.world
@@ -590,6 +591,7 @@ def fire_liquefier(game, grub, angle, power, click):
         return False
     cx, cy = click
     if math.hypot(cx - grub.x, cy - grub.y) > 110:
+        game.toast(cx, cy, "OUT OF RANGE")
         game.fx_event("tic", grub.x, grub.y, 1)
         return False
     w = game.world
@@ -643,6 +645,7 @@ def fire_teleport(game, grub, angle, power, click):
     cx, cy = click
     w = game.world
     if grub.collides(w, cx, cy):
+        game.toast(cx, cy, "BLOCKED")
         game.fx_event("tic", grub.x, grub.y, 1)
         return False              # blocked: keep your ammo and your turn
     game.fx_event("teleport", grub.x, grub.y, 2)
@@ -749,6 +752,9 @@ WEAPONS = [
 ]
 
 W_BY_KEY = {w.key: i for i, w in enumerate(WEAPONS)}
+
+# casting range per weapon key (drawn as a ring when selected)
+CAST_RANGE = {"transmute": 110, "liquefy": 110, "girder": 85}
 
 
 def default_ammo(settings=None):

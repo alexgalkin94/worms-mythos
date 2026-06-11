@@ -286,8 +286,13 @@ class GameScreen(Screen):
         spec = WEAPONS[self.game.weapon]
         if not mouse[0]:
             self._fire_block = False
+        # click-weapons fire where you click — except the homing missile,
+        # which becomes a charge weapon once its target is locked
+        click_style = spec.target == "click" and not (
+            spec.key == "homing"
+            and getattr(self.game, "_homing_target", None) is not None)
         inp.fire = keys[pygame.K_f] or (
-            mouse[0] and spec.target != "click" and not self.panel_open
+            mouse[0] and not click_style and not self.panel_open
             and not self.paused and not self._fire_block)
         inp.jump = self._jump
         inp.backflip = self._backflip

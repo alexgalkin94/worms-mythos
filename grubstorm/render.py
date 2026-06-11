@@ -366,7 +366,18 @@ class Renderer:
 
     def _draw_entities(self, game):
         v = self.view
-        from .weapons import BlackHole, Stream
+        from .weapons import BlackHole, Stream, WEAPONS, CAST_RANGE
+        # casting-range ring for the selected click weapon
+        g = game.active_grub
+        if g is not None and g.alive and game.phase == Game.PH_ACTIVE:
+            rng_r = CAST_RANGE.get(WEAPONS[game.weapon].key)
+            if rng_r:
+                pygame.draw.circle(v, (120, 104, 70), (int(g.x), int(g.y)),
+                                   rng_r, 1)
+        for (x, y, text, ttl) in game.toasts:
+            s = self.font.render(text, True, (255, 120, 100))
+            s.set_alpha(min(255, ttl * 6))
+            v.blit(s, (int(x) - s.get_width() // 2, int(y) - 4))
         for (x0, y0, x1, y1, ttl, col) in game.tracers:
             pygame.draw.line(v, col, (x0, y0), (x1, y1), 1)
         # homing lock-on marker

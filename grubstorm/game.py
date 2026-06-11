@@ -136,6 +136,7 @@ class Game:
         self.crates: list[Crate] = []
         self.fx: list[tuple] = []             # (kind, x, y, mag) for AV layer
         self.tracers: list[list] = []         # [x0, y0, x1, y1, ttl, color]
+        self.toasts: list[list] = []          # [x, y, text, ttl]
         self.headstones: list[tuple] = []
 
         # teams
@@ -220,6 +221,11 @@ class Game:
         if len(self.tracers) < 80:
             self.tracers.append([float(x0), float(y0), float(x1), float(y1),
                                  int(ttl), color])
+
+    def toast(self, x, y, text, ttl=70):
+        """Small floating message in world space (e.g. 'out of range')."""
+        if len(self.toasts) < 12:
+            self.toasts.append([float(x), float(y), text, int(ttl)])
 
     def spawn_trail(self, p):
         if p.trail == "smoke":
@@ -428,6 +434,10 @@ class Game:
         for tr in self.tracers:
             tr[4] -= 1
         self.tracers = [tr for tr in self.tracers if tr[4] > 0]
+        for to in self.toasts:
+            to[1] -= 0.12
+            to[3] -= 1
+        self.toasts = [to for to in self.toasts if to[3] > 0]
         # blowtorch/drill are hold-to-dig: releasing FIRE stops them
         if inp is not None and not inp.fire:
             from .weapons import Stream
