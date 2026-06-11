@@ -6,6 +6,7 @@ the same seed + biome gives the identical map on every lockstep client.
 import numpy as np
 
 from . import materials as M
+from . import chunks
 from .world import World
 from .constants import GRID_W, GRID_H
 
@@ -118,15 +119,18 @@ def _ocean(world, rows=14, mat=M.WATER):
     world.water_level = world.h - rows - 1
 
 
+def _barrel_at(world, x, y):
+    """A buried explosive barrel: metal shell around a nitro core."""
+    world.paint(x, y, 4, M.METAL, mode="replace")
+    world.paint(x, y, 2, M.NITRO, mode="replace")
+
+
 def _barrels(world, rng, n):
-    """Buried explosive barrels: a metal shell around a nitro core."""
     for _ in range(n):
         x = int(rng.integers(20, world.w - 20))
         y = int(rng.integers(30, world.h - 30))
-        if not world.is_solid(x, y):
-            continue
-        world.paint(x, y, 4, M.METAL, mode="replace")
-        world.paint(x, y, 2, M.NITRO, mode="replace")
+        if world.is_solid(x, y):
+            _barrel_at(world, x, y)
 
 
 def _find_spawns(world, n=16):
@@ -179,20 +183,13 @@ def generate(biome: str, seed: int, w: int = GRID_W, h: int = GRID_H) -> MapSpec
 # --------------------------------------------------------------- biomes ----
 def _gen_island(world, rng):
     h, w = world.h, world.w
-    surf = _heightmap(rng, w, int(h * 0.52), int(h * 0.22))
-    _fill_below(world, surf, M.DIRT)
-    _fill_below(world, surf + 26, M.STONE)
-    # caves
-    cav = _fbm(rng, h, w, 36, 3)
-    yy = np.arange(h)[:, None]
-    carve = (cav > 0.62) & (yy > surf[None, :] + 6)
-    world.mat[carve] = M.EMPTY
-    # water caves
-    _pockets(world, rng, 6, M.WATER, 6, 12, int(h * 0.6), h - 30)
-    _pockets(world, rng, 3, M.OIL, 4, 8, int(h * 0.65), h - 30)
-    _platforms(world, rng, 4, M.WOOD)
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.DIRT, "=": M.WOOD, "~": M.WATER,
+        "o": M.OIL, "*": M.GRAVEL, "?": M.DIRT})
+    chunks.place_features(world, rng, mk)
+    _pockets(world, rng, 3, M.WATER, 5, 9, int(h * 0.65), h - 30)
     _grass_tops(world)
-    _barrels(world, rng, 4)
+    _barrels(world, rng, 2)
     _ocean(world)
     return MapSpec("island", world, sky_top=(36, 62, 110),
                    sky_bottom=(196, 110, 74), ambient=22, decor="clouds",
@@ -201,21 +198,21 @@ def _gen_island(world, rng):
 
 def _gen_volcano(world, rng):
     h, w = world.h, world.w
-    mid = w // 2
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.GRAVEL, "=": M.STONE, "~": M.LAVA,
+        "o": M.NITRO, "*": M.EXPOWDER, "?": M.GRAVEL})
+    chunks.place_features(world, rng, mk, gas=M.GAS, barrels=False)
+    # the mountain itself rises over the chunk skyline
+    mid = w // 2 + int(rng.integers(-60, 60))
     xs = np.arange(w)
-    cone = (int(h * 0.78) - (np.maximum(0, 90 - np.abs(xs - mid)) * 1.4)).astype(int)
-    rough = _heightmap(rng, w, int(h * 0.62), int(h * 0.10))
-    surf = np.minimum(cone, rough)
-    _fill_below(world, surf, M.STONE)
-    cav = _fbm(rng, h, w, 30, 3)
+    cone = (int(h * 0.62) - (np.maximum(0, 84 - np.abs(xs - mid)) * 1.5)).astype(int)
+    cone += (_fbm(rng, 1, w, 30, 2)[0] * 14).astype(int)
     yy = np.arange(h)[:, None]
-    world.mat[(cav > 0.64) & (yy > surf[None, :] + 5)] = M.EMPTY
-    # crater full of lava + buried lava pockets + powder veins
-    world.paint(mid, surf[mid] + 4, 14, M.LAVA, mode="replace")
-    _pockets(world, rng, 7, M.LAVA, 5, 11, int(h * 0.55), h - 25)
-    _pockets(world, rng, 6, M.EXPOWDER, 4, 8, int(h * 0.5), h - 30)
-    _pockets(world, rng, 4, M.GAS, 5, 9, int(h * 0.5), h - 30)
-    world.mat[(_fbm(rng, h, w, 24, 2) > 0.74) & (yy > surf[None, :])] = M.GRAVEL
+    grow = (yy >= cone[None, :]) & (yy < int(h * 0.62)) & \
+        (np.abs(xs - mid)[None, :] < 86) & (world.mat == M.EMPTY)
+    world.mat[grow] = M.STONE
+    world.paint(mid, max(12, cone[mid] + 6), 13, M.LAVA, mode="replace")
+    _pockets(world, rng, 4, M.LAVA, 5, 10, int(h * 0.55), h - 25)
     _ocean(world, 12, M.LAVA)
     return MapSpec("volcano", world, sky_top=(22, 8, 14),
                    sky_bottom=(96, 30, 20), ambient=36, flood_mat=M.LAVA,
@@ -224,19 +221,11 @@ def _gen_volcano(world, rng):
 
 def _gen_sewer(world, rng):
     h, w = world.h, world.w
-    world.mat[:] = M.STONE
-    world.mat[:, 0] = world.mat[:, -1] = M.BEDROCK
-    # carve rooms and tunnels
-    rooms = _fbm(rng, h, w, 40, 3)
-    world.mat[rooms > 0.52] = M.EMPTY
-    for y in range(40, h - 20, 44):                  # horizontal pipe galleries
-        world.mat[y:y + 14, 10:w - 10] = M.EMPTY
-        world.mat[y + 14:y + 17, 10:w - 10] = M.METAL
-    _pockets(world, rng, 8, M.ACID, 5, 10, 30, h - 24, solid_only=False)
-    _pockets(world, rng, 8, M.SLUDGE, 5, 10, 30, h - 24, solid_only=False)
-    _pockets(world, rng, 5, M.TOXGAS, 5, 8, 20, h - 40, solid_only=False, life=255)
-    _pockets(world, rng, 4, M.WOOD, 4, 7, 40, h - 30)
-    world.mat[0:6, :] = M.BEDROCK                    # sealed ceiling
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.STONE, "=": M.METAL, "~": M.WATER,
+        "o": M.ACID, "*": M.GRAVEL, "?": M.STONE}, sealed=True)
+    chunks.place_features(world, rng, mk, gas=M.TOXGAS, barrels=False)
+    _pockets(world, rng, 3, M.SLUDGE, 4, 8, 30, h - 24, solid_only=False)
     _ocean(world, 12, M.ACID)
     return MapSpec("sewer", world, sky_top=(10, 18, 12),
                    sky_bottom=(28, 48, 30), ambient=18, flood_mat=M.ACID,
@@ -245,15 +234,12 @@ def _gen_sewer(world, rng):
 
 def _gen_tundra(world, rng):
     h, w = world.h, world.w
-    surf = _heightmap(rng, w, int(h * 0.5), int(h * 0.2))
-    _fill_below(world, surf, M.SNOW, 8)
-    _fill_below(world, surf + 8, M.ICE, 24)
-    _fill_below(world, surf + 32, M.STONE)
-    cav = _fbm(rng, h, w, 34, 3)
-    yy = np.arange(h)[:, None]
-    world.mat[(cav > 0.63) & (yy > surf[None, :] + 10)] = M.EMPTY
-    _pockets(world, rng, 6, M.WATER, 6, 12, int(h * 0.6), h - 26)
-    _pockets(world, rng, 3, M.CRYSTAL, 4, 7, int(h * 0.55), h - 30)
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.ICE, "=": M.WOOD, "~": M.WATER,
+        "o": M.WATER, "*": M.CRYSTAL, "?": M.ICE})
+    chunks.place_features(world, rng, mk, barrels=False)
+    _grass_tops(world, grass=M.SNOW, on=M.ICE)
+    _pockets(world, rng, 3, M.WATER, 5, 9, int(h * 0.6), h - 26)
     _ocean(world)
     return MapSpec("tundra", world, sky_top=(12, 18, 36),
                    sky_bottom=(86, 118, 156), ambient=-12, decor="snow",
@@ -262,16 +248,11 @@ def _gen_tundra(world, rng):
 
 def _gen_desert(world, rng):
     h, w = world.h, world.w
-    surf = _heightmap(rng, w, int(h * 0.5), int(h * 0.24), cell=80)
-    _fill_below(world, surf, M.SAND, 20)
-    _fill_below(world, surf + 20, M.DIRT, 16)
-    _fill_below(world, surf + 36, M.STONE)
-    cav = _fbm(rng, h, w, 38, 3)
-    yy = np.arange(h)[:, None]
-    world.mat[(cav > 0.66) & (yy > surf[None, :] + 12)] = M.EMPTY
-    _pockets(world, rng, 6, M.OIL, 6, 12, int(h * 0.62), h - 26)
-    _pockets(world, rng, 4, M.GAS, 5, 8, int(h * 0.55), h - 30)
-    _barrels(world, rng, 3)
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.SAND, "=": M.WOOD, "~": M.OIL,
+        "o": M.WATER, "*": M.NITRO, "?": M.SAND})
+    chunks.place_features(world, rng, mk)
+    _pockets(world, rng, 3, M.OIL, 5, 10, int(h * 0.62), h - 26)
     _ocean(world)
     return MapSpec("desert", world, sky_top=(64, 38, 28),
                    sky_bottom=(180, 122, 64), ambient=34, decor="dust",
@@ -280,17 +261,11 @@ def _gen_desert(world, rng):
 
 def _gen_cavern(world, rng):
     h, w = world.h, world.w
-    world.mat[:] = M.STONE
-    world.mat[:, 0] = world.mat[:, -1] = M.BEDROCK
-    cav = _fbm(rng, h, w, 44, 4)
-    world.mat[cav > 0.5] = M.EMPTY
-    dirt = _fbm(rng, h, w, 20, 2)
-    world.mat[(world.mat == M.STONE) & (dirt > 0.6)] = M.DIRT
-    _pockets(world, rng, 7, M.CRYSTAL, 3, 7, 20, h - 24)
-    _pockets(world, rng, 5, M.MAGIC, 4, 9, 40, h - 24, solid_only=False)
-    _pockets(world, rng, 5, M.WATER, 5, 10, 40, h - 24, solid_only=False)
-    _pockets(world, rng, 3, M.GAS, 5, 8, 20, h - 40, solid_only=False)
-    world.mat[0:6, :] = M.BEDROCK
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.DIRT, "=": M.WOOD, "~": M.MAGIC,
+        "o": M.WATER, "*": M.CRYSTAL, "?": M.DIRT}, sealed=True)
+    chunks.place_features(world, rng, mk, barrels=False)
+    _pockets(world, rng, 4, M.CRYSTAL, 3, 6, 20, h - 24)
     _ocean(world, 10)
     return MapSpec("cavern", world, sky_top=(8, 6, 16),
                    sky_bottom=(20, 14, 40), ambient=14, decor="spores",
@@ -299,23 +274,23 @@ def _gen_cavern(world, rng):
 
 def _gen_junkyard(world, rng):
     h, w = world.h, world.w
-    surf = _heightmap(rng, w, int(h * 0.6), int(h * 0.12))
-    _fill_below(world, surf, M.DIRT)
-    _fill_below(world, surf + 18, M.STONE)
-    # stacks of junk: metal slabs, wood, gravel piles
-    for _ in range(14):
-        x = int(rng.integers(20, w - 60))
-        y = int(rng.integers(int(h * 0.25), int(h * 0.6)))
-        kind = rng.integers(0, 3)
-        if kind == 0:
-            world.mat[y:y + 4, x:x + int(rng.integers(18, 44))] = M.METAL
-        elif kind == 1:
-            world.mat[y:y + 3, x:x + int(rng.integers(14, 30))] = M.WOOD
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.DIRT, "=": M.METAL, "~": M.OIL,
+        "o": M.SLUDGE, "*": M.GRAVEL, "?": M.DIRT})
+    chunks.place_features(world, rng, mk)
+    # junk piles strewn over the surface
+    for _ in range(8):
+        x = int(rng.integers(20, w - 50))
+        ys = np.nonzero(M.SOLID[world.mat[:, x]])[0]
+        if not len(ys):
+            continue
+        y = int(ys[0])
+        if rng.random() < 0.5:
+            world.mat[y - 3:y, x:x + int(rng.integers(14, 34))] = M.METAL
         else:
-            world.paint(x, y, int(rng.integers(5, 10)), M.GRAVEL, mode="replace")
-    _pockets(world, rng, 6, M.OIL, 5, 11, int(h * 0.55), h - 26)
-    _barrels(world, rng, 7)
-    _pockets(world, rng, 3, M.GAS, 4, 8, int(h * 0.4), h - 40)
+            world.paint(x, y - 2, int(rng.integers(4, 8)), M.GRAVEL,
+                        mode="replace")
+    _barrels(world, rng, 4)
     _grass_tops(world)
     _ocean(world, 12, M.SLUDGE)
     return MapSpec("junkyard", world, sky_top=(26, 20, 22),
@@ -325,25 +300,18 @@ def _gen_junkyard(world, rng):
 
 def _gen_mine(world, rng):
     h, w = world.h, world.w
-    world.mat[:] = M.DIRT
-    world.mat[:, 0] = world.mat[:, -1] = M.BEDROCK
-    rock = _fbm(rng, h, w, 26, 2)
-    world.mat[rock > 0.62] = M.STONE
-    # tunnels with wood supports
-    cav = _fbm(rng, h, w, 36, 3)
-    tunnels = cav > 0.58
-    world.mat[tunnels] = M.EMPTY
-    for x in range(16, w - 16, 22):
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.DIRT, "=": M.WOOD, "~": M.WATER,
+        "o": M.OIL, "*": M.EXPOWDER, "?": M.DIRT}, sealed=True)
+    chunks.place_features(world, rng, mk)
+    # wood supports under tunnel ceilings
+    for x in range(18, w - 18, 26):
         col = world.mat[:, x]
         ys = np.nonzero(col == M.EMPTY)[0]
         if len(ys):
-            y = ys[-1]
+            y = int(ys[-1])
             world.mat[max(0, y - 12):y + 1, x:x + 2] = M.WOOD
-    _pockets(world, rng, 10, M.EXPOWDER, 4, 9, 20, h - 24)
-    _pockets(world, rng, 6, M.GAS, 5, 9, 20, h - 40, solid_only=False)
-    _pockets(world, rng, 4, M.WATER, 5, 9, 40, h - 26, solid_only=False)
-    _pockets(world, rng, 3, M.NITRO, 3, 5, 60, h - 30)
-    world.mat[0:6, :] = M.BEDROCK
+    _pockets(world, rng, 4, M.EXPOWDER, 4, 8, 20, h - 24)
     _ocean(world, 10)
     return MapSpec("mine", world, sky_top=(14, 10, 8),
                    sky_bottom=(50, 36, 24), ambient=18, decor="dust",
@@ -380,15 +348,12 @@ def _gen_lab(world, rng):
 
 def _gen_candy(world, rng):
     h, w = world.h, world.w
-    surf = _heightmap(rng, w, int(h * 0.5), int(h * 0.26), cell=50)
-    _fill_below(world, surf, M.SLIME, 10)
-    _fill_below(world, surf + 10, M.SAND, 18)     # "sugar"
-    _fill_below(world, surf + 28, M.STONE)
-    cav = _fbm(rng, h, w, 32, 3)
-    yy = np.arange(h)[:, None]
-    world.mat[(cav > 0.64) & (yy > surf[None, :] + 8)] = M.EMPTY
-    _pockets(world, rng, 8, M.SLIME, 5, 11, int(h * 0.5), h - 26, solid_only=False)
-    _pockets(world, rng, 4, M.MAGIC, 4, 8, int(h * 0.55), h - 26)
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.SAND, "=": M.WOOD, "~": M.SLIME,
+        "o": M.MAGIC, "*": M.CRYSTAL, "?": M.SAND})
+    chunks.place_features(world, rng, mk, barrels=False)
+    _pockets(world, rng, 4, M.SLIME, 5, 9, int(h * 0.5), h - 26,
+             solid_only=False)
     _ocean(world, 12, M.SLIME)
     return MapSpec("candy", world, sky_top=(38, 14, 42),
                    sky_bottom=(176, 96, 140), ambient=22, flood_mat=M.SLIME,
@@ -397,20 +362,20 @@ def _gen_candy(world, rng):
 
 def _gen_moon(world, rng):
     h, w = world.h, world.w
-    surf = _heightmap(rng, w, int(h * 0.62), int(h * 0.14), cell=70)
-    _fill_below(world, surf, M.GRAVEL, 10)
-    _fill_below(world, surf + 10, M.STONE)
-    cav = _fbm(rng, h, w, 30, 3)
-    yy = np.arange(h)[:, None]
-    world.mat[(cav > 0.66) & (yy > surf[None, :] + 6)] = M.EMPTY
-    # metal domes with gas inside
-    for _ in range(4):
+    mk = chunks.build(world, rng, {
+        "#": M.STONE, "%": M.GRAVEL, "=": M.METAL, "~": M.EMPTY,
+        "o": M.EMPTY, "*": M.CRYSTAL, "?": M.GRAVEL})
+    chunks.place_features(world, rng, mk, barrels=False)
+    # metal domes with gas inside, settled on the chunk skyline
+    for _ in range(3):
         x = int(rng.integers(40, w - 40))
-        sy = int(surf[x])
-        world.paint(x, sy, 16, M.METAL, mode="replace")
-        world.paint(x, sy, 13, M.GAS, mode="replace", life=0)
-        world.paint(x, sy + 6, 8, M.STONE, mode="replace")
-    _pockets(world, rng, 4, M.CRYSTAL, 3, 6, int(h * 0.6), h - 26)
+        ys = np.nonzero(M.SOLID[world.mat[:, x]])[0]
+        if not len(ys):
+            continue
+        sy = int(ys[0])
+        world.paint(x, sy, 15, M.METAL, mode="replace")
+        world.paint(x, sy, 12, M.GAS, mode="replace", life=255)
+        world.paint(x, sy + 6, 7, M.STONE, mode="replace")
     _ocean(world, 8)
     return MapSpec("moon", world, sky_top=(4, 4, 10),
                    sky_bottom=(16, 16, 30), ambient=-30, gravity_scale=0.45,
