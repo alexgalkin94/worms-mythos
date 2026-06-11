@@ -5,23 +5,28 @@ import math
 import pygame
 
 from .constants import GRID_W, GRID_H, CELL_SCALE
+from .pixelfont import PixelFont
 
-ACCENT = (255, 170, 60)
-ACCENT2 = (120, 200, 255)
-FG = (235, 235, 245)
-DIM = (140, 140, 165)
-BG = (16, 16, 28)
-BG2 = (28, 28, 46)
+# Noita-toned interface: parchment text on near-black panels with thin
+# worn-bronze borders. No rounded corners, no anti-aliasing, ever.
+ACCENT = (214, 168, 84)        # worn gold
+ACCENT2 = (122, 168, 188)      # cold runic blue
+FG = (224, 210, 178)           # parchment
+DIM = (130, 118, 96)
+BG = (12, 10, 9)
+BG2 = (26, 22, 18)
+EDGE = (94, 80, 56)
+EDGE_HOT = (190, 152, 84)
 
 
 class UI:
     """Immediate mode: call begin() each frame with events, then widgets."""
     def __init__(self, audio):
         self.audio = audio
-        self.font = pygame.font.Font(None, 12)
-        self.font_m = pygame.font.Font(None, 16)
-        self.font_b = pygame.font.Font(None, 24)
-        self.font_t = pygame.font.Font(None, 44)
+        self.font = PixelFont(1)
+        self.font_m = PixelFont(1)
+        self.font_b = PixelFont(2)
+        self.font_t = PixelFont(4)
         self.mx = self.my = 0
         self.clicked = False
         self.mouse_down = False
@@ -63,12 +68,9 @@ class UI:
         return s.get_height()
 
     def title(self, surf, x, y, text, color=ACCENT):
-        glow = self.font_t.render(text, True,
-                                  tuple(min(255, c + 40) for c in color))
         s = self.font_t.render(text, True, color)
-        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            sh = self.font_t.render(text, True, (30, 20, 10))
-            surf.blit(sh, (x - sh.get_width() // 2 + dx, y + dy))
+        under = self.font_t.render(text, True, (52, 34, 14))
+        surf.blit(under, (x - s.get_width() // 2, y + 2))
         surf.blit(s, (x - s.get_width() // 2, y))
 
     def button(self, surf, rect, text, enabled=True, accent=False, font=None):
@@ -79,13 +81,17 @@ class UI:
             self._hover_prev = text
         elif not hov and self._hover_prev == text:
             self._hover_prev = None
-        base = BG2 if not hov else (44, 44, 70)
+        base = BG2 if not hov else (42, 35, 26)
         if accent:
-            base = (70, 45, 20) if not hov else (110, 70, 25)
-        pygame.draw.rect(surf, base, rect, border_radius=3)
-        edge = ACCENT if (hov or accent) else (70, 70, 100)
-        pygame.draw.rect(surf, edge if enabled else (50, 50, 60), rect, 1,
-                         border_radius=3)
+            base = (52, 38, 18) if not hov else (76, 56, 24)
+        pygame.draw.rect(surf, base, rect)
+        edge = EDGE_HOT if (hov or accent) else EDGE
+        pygame.draw.rect(surf, edge if enabled else (52, 46, 38), rect, 1)
+        # worn corner ticks, Noita-style
+        for cx, cy in (rect.topleft, (rect.right - 1, rect.top),
+                       (rect.left, rect.bottom - 1),
+                       (rect.right - 1, rect.bottom - 1)):
+            surf.set_at((cx, cy), BG)
         f = font or self.font_m
         col = FG if enabled else (90, 90, 100)
         if hov:
@@ -102,8 +108,8 @@ class UI:
         rect = pygame.Rect(rect)
         self.label(surf, rect.x, rect.y - 1, label, DIM, self.font)
         body = pygame.Rect(rect.x, rect.y + 9, rect.w, rect.h - 9)
-        pygame.draw.rect(surf, BG2, body, border_radius=3)
-        pygame.draw.rect(surf, (70, 70, 100), body, 1, border_radius=3)
+        pygame.draw.rect(surf, BG2, body)
+        pygame.draw.rect(surf, EDGE, body, 1)
         lb = pygame.Rect(body.x, body.y, 12, body.h)
         rb = pygame.Rect(body.right - 12, body.y, 12, body.h)
         for b, ch, cb in ((lb, "<", on_prev), (rb, ">", on_next)):
@@ -124,13 +130,14 @@ class UI:
         rect = pygame.Rect(rect)
         self.label(surf, rect.x, rect.y - 1, label, DIM, self.font)
         track = pygame.Rect(rect.x, rect.y + 12, rect.w, 4)
-        pygame.draw.rect(surf, BG2, track, border_radius=2)
+        pygame.draw.rect(surf, BG2, track)
+        pygame.draw.rect(surf, EDGE, track, 1)
         frac = (value - lo) / (hi - lo) if hi > lo else 0
-        fill = pygame.Rect(track.x, track.y, int(track.w * frac), 4)
-        pygame.draw.rect(surf, ACCENT, fill, border_radius=2)
+        fill = pygame.Rect(track.x + 1, track.y + 1, int((track.w - 2) * frac), 2)
+        pygame.draw.rect(surf, ACCENT, fill)
         hx = track.x + int(track.w * frac)
-        knob = pygame.Rect(hx - 2, track.y - 2, 5, 8)
-        pygame.draw.rect(surf, FG, knob, border_radius=2)
+        knob = pygame.Rect(hx - 1, track.y - 2, 3, 8)
+        pygame.draw.rect(surf, FG, knob)
         zone = pygame.Rect(rect.x - 2, rect.y + 6, rect.w + 4, 16)
         if self.mouse_down and self._hover(zone):
             frac = max(0.0, min(1.0, (self.mx - track.x) / track.w))
@@ -140,12 +147,11 @@ class UI:
     def toggle(self, surf, rect, label, value):
         rect = pygame.Rect(rect)
         hov = self._hover(rect)
-        pygame.draw.rect(surf, BG2 if not hov else (44, 44, 70), rect,
-                         border_radius=3)
-        pygame.draw.rect(surf, (70, 70, 100), rect, 1, border_radius=3)
+        pygame.draw.rect(surf, BG2 if not hov else (42, 35, 26), rect)
+        pygame.draw.rect(surf, EDGE_HOT if hov else EDGE, rect, 1)
         box = pygame.Rect(rect.x + 4, rect.centery - 4, 8, 8)
-        pygame.draw.rect(surf, BG, box, border_radius=2)
-        pygame.draw.rect(surf, DIM, box, 1, border_radius=2)
+        pygame.draw.rect(surf, BG, box)
+        pygame.draw.rect(surf, DIM, box, 1)
         if value:
             pygame.draw.rect(surf, ACCENT, box.inflate(-4, -4))
         s = self.font_m.render(label, True, FG)
@@ -162,9 +168,8 @@ class UI:
         self.label(surf, rect.x, rect.y - 1, label, DIM, self.font)
         body = pygame.Rect(rect.x, rect.y + 9, rect.w, rect.h - 9)
         hov = self._hover(body)
-        pygame.draw.rect(surf, BG2, body, border_radius=3)
-        pygame.draw.rect(surf, ACCENT if active else (70, 70, 100), body, 1,
-                         border_radius=3)
+        pygame.draw.rect(surf, BG2, body)
+        pygame.draw.rect(surf, EDGE_HOT if active else EDGE, body, 1)
         if self.clicked:
             active = hov
         if active:
@@ -181,9 +186,16 @@ class UI:
     def panel(self, surf, rect, title=None):
         rect = pygame.Rect(rect)
         p = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
-        p.fill((14, 14, 26, 225))
+        p.fill((10, 8, 7, 232))
         surf.blit(p, rect.topleft)
-        pygame.draw.rect(surf, (70, 70, 110), rect, 1, border_radius=4)
+        pygame.draw.rect(surf, EDGE, rect, 1)
+        # double-line top edge with corner ticks
+        pygame.draw.line(surf, (56, 48, 34), (rect.x + 2, rect.y + 2),
+                         (rect.right - 3, rect.y + 2))
+        for cx, cy in (rect.topleft, (rect.right - 1, rect.top),
+                       (rect.left, rect.bottom - 1),
+                       (rect.right - 1, rect.bottom - 1)):
+            surf.set_at((cx, cy), EDGE_HOT)
         if title:
             s = self.font_b.render(title, True, ACCENT)
             surf.blit(s, (rect.centerx - s.get_width() // 2, rect.y + 5))

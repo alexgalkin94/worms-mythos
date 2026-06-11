@@ -785,7 +785,8 @@ class App:
         self.clock = pygame.time.Clock()
         self.sim_steps = 1
         self._acc = 0.0
-        self._fps_font = pygame.font.Font(None, 14)
+        from .pixelfont import PixelFont
+        self._fps_font = PixelFont(1)
 
     def apply_window(self):
         scale = int(self.settings.get("render_scale", 3))

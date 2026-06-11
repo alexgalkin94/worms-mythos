@@ -146,10 +146,12 @@ POISONOUS = np.zeros(N_MATS, bool)
 POISONOUS[[SLUDGE, TOXGAS]] = True
 
 # --- palette: 4 shades per material, RGB -----------------------------------
-def _shades(base, spread=14):
+# wide, darker-biased value range: with per-pixel grain this reads like
+# Noita's speckled materials instead of flat plastic
+def _shades(base, spread=18):
     r, g, b = base
     out = []
-    for k in (-1, 0, 1, 2):
+    for k in (-2, -1, 0, 1):
         out.append((max(0, min(255, r + k * spread)),
                     max(0, min(255, g + k * spread)),
                     max(0, min(255, b + k * spread))))
@@ -174,7 +176,7 @@ _base = {
     SNOW:     (218, 226, 240),
     ASH:      (74, 71, 76),
     EXPOWDER: (180, 48, 48),
-    WATER:    (36, 88, 178),
+    WATER:    (28, 56, 104),
     OIL:      (42, 34, 28),
     ACID:     (108, 235, 48),
     LAVA:     (250, 110, 30),
@@ -191,6 +193,10 @@ _base = {
 }
 for _m, _c in _base.items():
     PALETTE[_m] = _shades(_c)
+# liquids and gases stay flatter — their texture is their motion
+for _m in (WATER, OIL, ACID, SLUDGE, SLIME, NITRO, NAPALM,
+           SMOKE, STEAM, GAS, TOXGAS):
+    PALETTE[_m] = _shades(_base[_m], spread=6)
 # fire gets a hotter ramp instead of even shades
 PALETTE[FIRE] = [(255, 90, 20), (255, 140, 30), (255, 190, 60), (255, 235, 120)]
 PALETTE[LAVA] = [(200, 60, 15), (235, 95, 20), (255, 130, 35), (255, 170, 60)]

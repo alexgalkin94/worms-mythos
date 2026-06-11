@@ -11,6 +11,7 @@ from .constants import (GRID_W, GRID_H, TEAM_COLORS, TEAM_COLORS_CB,
                         GRUB_RADIUS)
 from .game import Game
 from .particles import KIND_MAT, KIND_SPARK, KIND_FX
+from .pixelfont import PixelFont
 
 _KEY = (255, 0, 255)
 
@@ -53,9 +54,9 @@ class Renderer:
         self._dark = None
         self._light_built = False
         self._world_ref = None
-        self.font = pygame.font.Font(None, 12)
-        self.font_big = pygame.font.Font(None, 22)
-        self.font_huge = pygame.font.Font(None, 34)
+        self.font = PixelFont(1)
+        self.font_big = PixelFont(2)
+        self.font_huge = PixelFont(3)
         self.camera = Camera()
         self._sky_cache = None
         self._sky_key = None
@@ -105,9 +106,9 @@ class Renderer:
             elif kind == "clouds":
                 if i % 6 == 0:
                     xx = (x + t * 0.05 * z) % (GRID_W + 60) - 30
-                    pygame.draw.ellipse(v, (250, 250, 255),
+                    pygame.draw.ellipse(v, (96, 88, 102),
                                         (xx, y * 0.35, 38 * z, 9 * z))
-                    pygame.draw.ellipse(v, (250, 250, 255),
+                    pygame.draw.ellipse(v, (118, 108, 122),
                                         (xx + 8 * z, y * 0.35 - 3 * z,
                                          22 * z, 8 * z))
             elif kind == "drips":
@@ -439,8 +440,9 @@ class Renderer:
         from .weapons import WEAPONS
         spec = WEAPONS[game.weapon]
         ammo = game.current_team().ammo.get(game.weapon, 0)
-        ammo_s = "∞" if ammo < 0 else str(ammo)
-        wtxt = self.font.render(f"{spec.name} [{ammo_s}]", True, (250, 250, 255))
+        wtxt = self.font.render(
+            spec.name if ammo < 0 else f"{spec.name} [{ammo}]",
+            True, (224, 210, 178))
         pygame.draw.rect(v, (16, 16, 26),
                          (4, GRID_H - 16, wtxt.get_width() + 8, 12))
         v.blit(wtxt, (8, GRID_H - 14))

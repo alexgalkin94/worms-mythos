@@ -27,13 +27,15 @@ class World:
         self.w, self.h = w, h
         self.rng = np.random.default_rng(seed)
         self.mat = np.zeros((h, w), np.uint8)
-        # spatially-coherent shade texture: terrain reads as rock strata and
-        # grain instead of per-pixel static
-        coarse = self.rng.random((h // 6 + 2, w // 6 + 2))
-        big = np.kron(coarse, np.ones((6, 6)))[:h, :w]
-        big = (big + np.kron(self.rng.random((h // 2 + 1, w // 2 + 1)),
-                             np.ones((2, 2)))[:h, :w] * 0.4) / 1.4
-        self.tex = np.clip(big * 3.999, 0, 3.999).astype(np.uint8)
+        # Noita-style material grain: heavy per-pixel speckle, clustered by
+        # larger patches, with faint horizontal strata running through it
+        coarse = np.kron(self.rng.random((h // 6 + 2, w // 6 + 2)),
+                         np.ones((6, 6)))[:h, :w]
+        fine = self.rng.random((h, w))
+        rows = np.kron(self.rng.random(h // 3 + 1), np.ones(3))[:h]
+        strata = (np.sin(np.arange(h) * 0.45 + rows * 6.0) * 0.5 + 0.5)
+        mix = coarse * 0.35 + fine * 0.5 + strata[:, None] * 0.15
+        self.tex = np.clip(mix * 4.6 - 0.3, 0, 3.999).astype(np.uint8)
         self.shade = self.tex.copy()
         self.life = np.zeros((h, w), np.uint8)    # gas life / burn fuel
         self.burn = np.zeros((h, w), np.uint8)    # burning flag for fuels
