@@ -55,11 +55,14 @@ class CRT:
         stagger = ((xs // 3) % 2) * (slot_h // 2)
         slot_row = (ys[None, :] + stagger[:, None]) % slot_h
         gap = slot_row == slot_h - 1
-        m[gap] *= 0.78
-        # scanlines: one darker row per source row, one slightly dim
-        m[:, ys % sc == 0] *= 0.55
-        if sc >= 3:
-            m[:, ys % sc == 1] *= 0.88
+        m[gap] *= 0.85
+        # scanlines: gaussian beam profile per source row — bright centre,
+        # symmetric falloff. Combined with the horizontal smear this turns
+        # every pixel into a glowing "pill" instead of a square.
+        c = (sc - 1) / 2.0
+        sigma = sc * 0.34
+        beam = np.exp(-(((ys % sc) - c) / sigma) ** 2).astype(np.float32)
+        m *= np.maximum(beam, 0.30)[None, :]
         # per-channel lane attenuation (phosphor triads)
         col = np.empty((w, h, 3), np.float32)
         col[:] = m[:, :, None]
