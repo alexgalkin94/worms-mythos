@@ -58,6 +58,10 @@ class SandboxScreen:
         self.msg = ""
         self.msg_t = 0
 
+        class _LabSpec:
+            light = 0.85
+        self._spec = _LabSpec()
+
     def update(self, events):
         for e in events:
             if e.type == pygame.KEYDOWN:
@@ -93,17 +97,18 @@ class SandboxScreen:
             elif pygame.mouse.get_pressed()[2]:
                 self.world.paint(ui.mx, ui.my, self.brush, M.EMPTY, mode="erase")
         if self.running:
-            self.world.step()
-            self.particles.step(self.world)
-            for ev in self.world.events:
-                if ev["type"] in ("debris", "splash"):
-                    dx, dy = ev["x"] - ev["ox"], ev["y"] - ev["oy"]
-                    d = math.hypot(dx, dy) or 1
-                    sp = ev["power"] * 0.03
-                    self.particles.spawn(ev["x"], ev["y"], dx / d * sp,
-                                         dy / d * sp - 0.8, ev["mat"],
-                                         KIND_MAT, 240)
-            self.world.events.clear()
+            for _ in range(self.app.sim_steps):
+                self.world.step()
+                self.particles.step(self.world)
+                for ev in self.world.events:
+                    if ev["type"] in ("debris", "splash"):
+                        dx, dy = ev["x"] - ev["ox"], ev["y"] - ev["oy"]
+                        d = math.hypot(dx, dy) or 1
+                        sp = ev["power"] * 0.03
+                        self.particles.spawn(ev["x"], ev["y"], dx / d * sp,
+                                             dy / d * sp - 0.8, ev["mat"],
+                                             KIND_MAT, 240)
+                self.world.events.clear()
         if self.msg_t > 0:
             self.msg_t -= 1
 
@@ -113,22 +118,19 @@ class SandboxScreen:
         # cells (reuse renderer compose path on a bare world)
         r = app.renderer
         r._t += 1
-        r._compose_cells(self.world)
+        changed = r.refresh_cells(self.world)
+        if changed or not r._light_built:
+            r._rebuild_light(self.world, self._spec)
+            r._light_built = True
         view.blit(r.cell_surf, (0, 0))
-        if r._gas_rect is not None:
-            view.blit(r._gas_layer, r._gas_rect)
+        view.blit(r.gas_surf, (0, 0))
         # particles
         ps = self.particles
         for i in ps.live_indices():
             x, y = int(ps.x[i]), int(ps.y[i])
             if 0 <= x < GRID_W and 0 <= y < GRID_H:
                 view.set_at((x, y), tuple(int(c) for c in M.PALETTE[int(ps.mat[i])][1]))
-        # emission glow
-        class _FakeSpec:
-            light = 0.85
-        class _FakeGame:
-            projectiles = []
-        r._light_pass(self.world, _FakeSpec, _FakeGame)
+        r._apply_light()
         # brush cursor
         pygame.draw.circle(view, (255, 255, 255), (ui.mx, ui.my),
                            self.brush, 1)

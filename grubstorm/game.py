@@ -614,6 +614,7 @@ class Game:
         self.world.tick = snap["world_tick"]
         self.world._wake_box = list(snap["wake_box"]) \
             if snap["wake_box"] is not None else None
+        self.world.render_dirty = [0, self.world.h, 0, self.world.w]
         # the phase/density mirrors must match the restored cells everywhere,
         # since future active regions assume out-of-region mirrors are valid
         self.world.phase = M.PHASE[self.world.mat]

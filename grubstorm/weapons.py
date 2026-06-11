@@ -248,7 +248,8 @@ class Stream:
             # melt a tunnel in front of the grub and shuffle forward
             tx, ty = g.x + dx * 4, g.y + dy * 2
             w.paint(tx, ty, 4, M.EMPTY, mode="erase")
-            w.temp[int(ty), int(tx)] += 30
+            if w.in_bounds(int(tx), int(ty)):
+                w.temp[int(ty), int(tx)] += 30
             if self.life % 3 == 0:
                 g._move_horizontal(w, g.facing * 0.5)
             game.fx_event("torch", tx, ty, 1)
@@ -379,7 +380,8 @@ def fire_napalmstrike(game, grub, angle, power, click):
         def drop(g, px, py):
             g.apply_explosion(px, py, 6, 24, fire=True)
             g.world.paint(px, py, 5, M.NAPALM, mode="fill")
-            g.world.temp[int(py), int(px)] = 500
+            if g.world.in_bounds(int(px), int(py)):
+                g.world.temp[int(py), int(px)] = 500
         game.add_projectile(Projectile(x, -10 - i * 6, 0, 1.6, wind=0,
                                        explode_r=0, on_explode=drop,
                                        glyph="ball", color=(255, 140, 40),

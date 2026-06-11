@@ -43,9 +43,16 @@ class Renderer:
         self.view = pygame.Surface((GRID_W, GRID_H))
         self.cell_surf = pygame.Surface((GRID_W, GRID_H))
         self.cell_surf.set_colorkey(_KEY)
+        self.cell_surf.fill(_KEY)
         self.gas_surf = pygame.Surface((GRID_W, GRID_H))
         self.gas_surf.set_colorkey(_KEY)
         self.gas_surf.set_alpha(150)
+        self.gas_surf.fill(_KEY)
+        self.em_surf = pygame.Surface((GRID_W, GRID_H))
+        self._glow = pygame.Surface((GRID_W, GRID_H))
+        self._dark = None
+        self._light_built = False
+        self._world_ref = None
         self.font = pygame.font.Font(None, 12)
         self.font_big = pygame.font.Font(None, 22)
         self.font_huge = pygame.font.Font(None, 34)
@@ -119,54 +126,55 @@ class Renderer:
                     v.set_at((int(x), int(y)), (255, 230, 120))
 
     # --------------------------------------------------------------- cells
-    def _compose_cells(self, world):
-        mat = world.mat
+    # The composed cell/gas/emission surfaces persist between frames; only
+    # the world's dirty rectangle is recomposed, and only on sim ticks.
+    # Render-only frames (high-FPS mode) just re-blit cached surfaces.
+    def refresh_cells(self, world):
+        if self._world_ref is not world:        # screen switched worlds
+            self._world_ref = world
+            self._light_built = False
+            world.render_dirty = [0, world.h, 0, world.w]
+        box = world.render_dirty
+        if box is None:
+            return False
+        world.render_dirty = None
+        y0 = max(0, box[0] - 1); y1 = min(world.h, box[1] + 1)
+        x0 = max(0, box[2] - 1); x1 = min(world.w, box[3] + 1)
+        if y0 >= y1 or x0 >= x1:
+            return False
+        mat = world.mat[y0:y1, x0:x1]
         idxT = np.ascontiguousarray(
-            ((mat.astype(np.uint16) << 2) | world.shade).T)
-        rgbT = PAL_FLAT[idxT]                            # (W, H, 3)
+            ((mat.astype(np.uint16) << 2) | world.shade[y0:y1, x0:x1]).T)
+        rgbT = PAL_FLAT[idxT]                            # (w, h, 3)
         # burning cells flicker orange
-        burning = world.burn.T > 0
+        burning = world.burn[y0:y1, x0:x1].T > 0
         if burning.any():
             n = int(burning.sum())
             fl = (np.arange(n) + self._t) % 3
             rgbT[burning] = np.array([(255, 140, 40), (255, 100, 30),
                                       (240, 180, 60)], np.uint8)[fl]
-        # (world.phase is only refreshed inside the active region, so derive
-        # the phase from the material ids we already transposed)
-        phT = M.PHASE[(idxT >> 2).astype(np.uint8)]
+        matT = (idxT >> 2).astype(np.uint8)
+        phT = M.PHASE[matT]
         gasT = phT == M.P_GAS
+        gas_rgb = rgbT.copy()
+        gas_rgb[~gasT] = _KEY
         rgbT[phT <= M.P_GAS] = _KEY                      # key out empty + gas
-        pygame.surfarray.blit_array(self.cell_surf, rgbT)
-        # gases get their own translucent layer, only over their bbox
-        self._gas_rect = None
-        if gasT.any():
-            cols = gasT.any(1)
-            rows = gasT.any(0)
-            x0 = int(cols.argmax()); x1 = len(cols) - int(cols[::-1].argmax())
-            y0 = int(rows.argmax()); y1 = len(rows) - int(rows[::-1].argmax())
-            sub_idx = idxT[x0:x1, y0:y1]
-            sub_rgb = PAL_FLAT[sub_idx]
-            sub_rgb[~gasT[x0:x1, y0:y1]] = _KEY
-            gs = pygame.Surface((x1 - x0, y1 - y0))
-            pygame.surfarray.blit_array(gs, sub_rgb)
-            gs.set_colorkey(_KEY)
-            gs.set_alpha(150)
-            self._gas_layer = gs
-            self._gas_rect = (x0, y0)
-        return mat
+        rect = (x0, y0, x1 - x0, y1 - y0)
+        pygame.surfarray.blit_array(self.cell_surf.subsurface(rect), rgbT)
+        pygame.surfarray.blit_array(self.gas_surf.subsurface(rect), gas_rgb)
+        pygame.surfarray.blit_array(self.em_surf.subsurface(rect),
+                                    EMIT_FLAT[matT])
+        return True
 
-    def _light_pass(self, world, spec, game):
-        """Additive glow from emissive materials + ambient darkness."""
-        mat = world.mat
-        # emission sampled at half res — it gets blurred to mush anyway
-        em = EMIT_FLAT[np.ascontiguousarray(mat[::2, ::2].T)]
+    def _rebuild_light(self, world, spec, projectiles=()):
+        """Blurred glow from the emission surface + cave darkness."""
         sw, sh = GRID_W // 6, GRID_H // 6
-        em_surf = pygame.Surface((GRID_W // 2, GRID_H // 2))
-        pygame.surfarray.blit_array(em_surf, em)
-        small = pygame.transform.smoothscale(em_surf, (sw, sh))
+        small = pygame.transform.smoothscale(self.em_surf, (sw, sh))
         small = pygame.transform.smoothscale(small, (sw // 2, sh // 2))
-        glow = pygame.transform.smoothscale(small, (GRID_W, GRID_H))
-        # darkness multiply for caves
+        self._glow = pygame.transform.smoothscale(small, (GRID_W, GRID_H))
+        bloom = float(self.settings.get("bloom", 0.7))
+        if bloom < 0.99:
+            self._glow.set_alpha(int(255 * bloom))
         amb = spec.light
         if amb < 0.999:
             dark = pygame.Surface((GRID_W, GRID_H))
@@ -175,16 +183,19 @@ class Renderer:
             light_up = pygame.transform.smoothscale(small, (GRID_W, GRID_H))
             for _ in range(2):
                 dark.blit(light_up, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
-            # muzzle/projectile lights
-            for p in game.projectiles:
+            for p in projectiles:
                 pygame.draw.circle(dark, (70, 60, 50), (int(p.x), int(p.y)), 16)
-            self.view.blit(dark, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
-        bloom = float(self.settings.get("bloom", 0.7))
-        if bloom > 0.05:
-            if bloom < 0.99:
-                glow.set_alpha(int(255 * bloom))
+            self._dark = dark
+        else:
+            self._dark = None
+
+    def _apply_light(self):
+        if self._dark is not None:
+            self.view.blit(self._dark, (0, 0),
+                           special_flags=pygame.BLEND_RGB_MULT)
+        if float(self.settings.get("bloom", 0.7)) > 0.05:
             for _ in range(2):
-                self.view.blit(glow, (0, 0),
+                self.view.blit(self._glow, (0, 0),
                                special_flags=pygame.BLEND_RGB_ADD)
 
     # ------------------------------------------------------------ entities
@@ -393,12 +404,14 @@ class Renderer:
         self.camera.update()
         spec = game.spec
         v = self.view
+        changed = self.refresh_cells(game.world)
+        if changed or game.projectiles or not self._light_built:
+            self._rebuild_light(game.world, spec, game.projectiles)
+            self._light_built = True
         v.blit(self._sky(spec), (0, 0))
         self._draw_decor(spec)
-        self._compose_cells(game.world)
         v.blit(self.cell_surf, (0, 0))
-        if self._gas_rect is not None:
-            v.blit(self._gas_layer, self._gas_rect)
+        v.blit(self.gas_surf, (0, 0))
         self._draw_headstones(game)
         self._draw_entities(game)
         for p in game.projectiles:
@@ -408,7 +421,7 @@ class Renderer:
             if g.alive:
                 self._draw_grub(game, g, g is game.active_grub and
                                 game.phase in (Game.PH_ACTIVE, Game.PH_RETREAT))
-        self._light_pass(game.world, spec, game)
+        self._apply_light()
         if self.camera.flash > 0.03 and not self.settings.get("reduce_flash"):
             f = pygame.Surface((GRID_W, GRID_H))
             f.fill((255, 240, 220))

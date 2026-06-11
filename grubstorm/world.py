@@ -37,6 +37,7 @@ class World:
         self.shade = self.tex.copy()
         self.life = np.zeros((h, w), np.uint8)    # gas life / burn fuel
         self.burn = np.zeros((h, w), np.uint8)    # burning flag for fuels
+        self.rest = np.zeros((h, w), np.uint8)    # liquid settle counter
         self.temp = np.full((h, w), 20.0, np.float32)
         self.moved = np.zeros((h, w), np.uint8)
         self.tick = 0
@@ -55,6 +56,8 @@ class World:
         self.phase = M.PHASE[self.mat]
         self.dens = M.DENSITY[self.mat]
         self._wake_box: list[int] | None = [0, h, 0, w]
+        self.render_dirty: list[int] | None = [0, h, 0, w]
+        self.last_region = None
         self._ry0 = self._rx0 = 0
 
     # ------------------------------------------------------------- helpers
@@ -78,6 +81,9 @@ class World:
             self.mat[yi, xi] = mat
             self.life[yi, xi] = life
             self.burn[yi, xi] = 0
+            y0, y1 = max(0, yi - 2), min(self.h, yi + 3)
+            x0, x1 = max(0, xi - 2), min(self.w, xi + 3)
+            self.rest[y0:y1, x0:x1] = 0   # edits disturb settled fluids
             self.wake(xi - 1, yi - 1, xi + 1, yi + 1)
 
     def _disk(self, x, y, r):
@@ -102,6 +108,8 @@ class World:
         if noise > 0:
             mask &= self.rng.random(mask.shape) > noise * (np.sqrt(d2) / max(r, 1))
         sub = self.mat[sy, sx]
+        if life == 0 and mat in (M.SMOKE, M.STEAM, M.TOXGAS, M.GAS):
+            life = 200                # free gas always dissipates eventually
         if mode == "fill":
             mask &= (M.PHASE[sub] == M.P_EMPTY) | (M.PHASE[sub] == M.P_GAS)
         elif mode == "replace":
@@ -114,6 +122,7 @@ class World:
         self.life[sy, sx][mask] = life
         self.burn[sy, sx][mask] = 0
         self.shade[sy, sx][mask] = self.tex[sy, sx][mask]
+        self.rest[sy, sx] = 0         # let nearby liquids react to the edit
         self.wake(sx.start - 1, sy.start - 1, sx.stop + 1, sy.stop + 1)
 
     def raycast(self, x, y, dx, dy, max_len, hit_liquid=False):
@@ -146,29 +155,40 @@ class World:
         else:
             b[0] = min(b[0], y0); b[1] = max(b[1], y1)
             b[2] = min(b[2], x0); b[3] = max(b[3], x1)
+        d = self.render_dirty
+        if d is None:
+            self.render_dirty = [y0, y1, x0, x1]
+        else:
+            d[0] = min(d[0], y0); d[1] = max(d[1], y1)
+            d[2] = min(d[2], x0); d[3] = max(d[3], x1)
 
-    def _wake_mask(self, mask):
+    def _wake_mask(self, mask, oy=0, ox=0):
         rows = mask.any(1)
         if not rows.any():
             return
         cols = mask.any(0)
         y0 = int(rows.argmax()); y1 = len(rows) - int(rows[::-1].argmax())
         x0 = int(cols.argmax()); x1 = len(cols) - int(cols[::-1].argmax())
-        self.wake(x0, y0, x1 - 1, y1 - 1)
+        self.wake(ox + x0, oy + y0, ox + x1 - 1, oy + y1 - 1)
 
-    def _apply_moves(self, mask, dy, dx):
+    def _apply_moves(self, mask, dy, dx, reset_rest=True):
         ys, xs = np.nonzero(mask)
         n = len(ys)
         if n == 0:
             return 0
         ty, tx = ys + dy, xs + dx
         for a in (self.v_mat, self.v_shade, self.v_life, self.v_burn,
-                  self.v_temp, self.v_phase, self.v_dens):
+                  self.v_temp, self.v_phase, self.v_dens, self.v_rest):
             tmp = a[ty, tx].copy()
             a[ty, tx] = a[ys, xs]
             a[ys, xs] = tmp
         self.v_moved[ys, xs] = 1
         self.v_moved[ty, tx] = 1
+        if reset_rest:
+            # gravity-driven motion is "real" flow and wakes the cell;
+            # flat lateral wandering carries its rest along and ages out
+            self.v_rest[ys, xs] = 0
+            self.v_rest[ty, tx] = 0
         oy, ox = self._ry0, self._rx0
         self.wake(ox + int(xs.min()) - 1, oy + int(ys.min()) - 1,
                   ox + int(xs.max()) + 1, oy + int(ys.max()) + 1)
@@ -227,16 +247,25 @@ class World:
             free = ph <= M.P_GAS
             ok = liq & self._bshift(free, g, dd)
             n += self._apply_moves(ok, g, dd)
-        # lateral flow (moved-gated so cells don't slosh back and forth)
+        # lateral flow. Pouring over an edge is real flow (always allowed,
+        # resets rest); sloshing on flat ground is gated by the rest counter
+        # so big pools go to sleep instead of jittering forever.
         visc = M.VISCOSITY[self.v_mat]
         for dd in (d, -d):
             ph = self.v_phase
             free = ph <= M.P_GAS
             liq = (ph == M.P_LIQUID) & (self.v_moved == 0)
             grounded = liq & ~self._bshift(free, g, 0)
-            ok = grounded & self._bshift(free, 0, dd) & (rnd > visc) & \
-                 ((rnd < 0.5) if dd == d else (rnd >= 0.5))
-            n += self._apply_moves(ok, 0, dd)
+            side_free = self._bshift(free, 0, dd) & (rnd > visc) & \
+                ((rnd < 0.5) if dd == d else (rnd >= 0.5))
+            pour = self._bshift(free, g, dd)
+            n += self._apply_moves(grounded & side_free & pour, 0, dd)
+            ph = self.v_phase
+            liq = (ph == M.P_LIQUID) & (self.v_moved == 0)
+            grounded = liq & ~self._bshift(ph <= M.P_GAS, g, 0)
+            flat = grounded & side_free & ~pour & \
+                (self.v_rest < self.REST_K)
+            n += self._apply_moves(flat, 0, dd, reset_rest=False)
         return n
 
     def _gas_pass(self, parity):
@@ -246,113 +275,137 @@ class World:
             return 0
         g = -self.gravity_dir
         empty = ph == M.P_EMPTY
-        n = self._apply_moves(gas & self._bshift(empty, g, 0) & (rnd < 0.8),
+        # fire clings to flammable fuel directly beneath it; other fire
+        # lingers a little before floating up
+        is_fire = self.v_mat == M.FIRE
+        if is_fire.any():
+            fuel_below = self._bshift(M.FLAMMABLE[self.v_mat] > 0,
+                                      self.gravity_dir, 0)
+            stuck = is_fire & fuel_below
+            gas = gas & ~stuck
+        else:
+            stuck = np.zeros_like(gas)
+        rise_p = np.where(is_fire, np.float32(0.45), np.float32(0.8))
+        n = self._apply_moves(gas & self._bshift(empty, g, 0) & (rnd < rise_p),
                               g, 0)
         d = 1 if parity else -1
         if abs(self.wind) > 0.01:           # wind drifts gases
             d = 1 if self.wind > 0 else -1
+        # like liquids, a cloud pinned under a ceiling calms down and rests:
+        # diagonal rising is buoyancy (resets rest), sideways drift is not
         for dd in (d, -d):
             ph = self.v_phase
-            gas = (ph == M.P_GAS) & (self.v_moved == 0)
+            awake = self.v_rest < self.REST_K
+            gas = (ph == M.P_GAS) & (self.v_moved == 0) & awake & ~stuck
             empty = ph == M.P_EMPTY
             ok = gas & self._bshift(empty, g, dd) & (rnd < 0.6)
             n += self._apply_moves(ok, g, dd)
             ph = self.v_phase
-            gas = (ph == M.P_GAS) & (self.v_moved == 0)
+            gas = (ph == M.P_GAS) & (self.v_moved == 0) & awake & ~stuck
             empty = ph == M.P_EMPTY
             ok = gas & self._bshift(empty, 0, dd) & \
                  ((rnd < 0.45) if dd == d else (rnd > 0.55))
-            n += self._apply_moves(ok, 0, dd)
+            n += self._apply_moves(ok, 0, dd, reset_rest=False)
         return n
 
     # ------------------------------------------------------------ reactions
-    def _hot_mask(self):
-        mat = self.mat
-        return (mat == M.FIRE) | (mat == M.LAVA) | (self.burn > 0)
-
+    # All reaction passes run on the active-region views (v_*). Anything that
+    # keeps reacting (fire, burning fuel, idle acid against terrain) wakes
+    # itself each tick, so it can never fall out of the region while active.
     def _fire_pass(self):
-        mat, rng = self.mat, self.rng
+        mat, rng = self.v_mat, self.rng
+        life, burn = self.v_life, self.v_burn
+        oy, ox = self._ry0, self._rx0
         # fire consumes itself
         fire = mat == M.FIRE
         if fire.any():
-            self._wake_mask(fire)
-            self.life[fire] = np.maximum(self.life[fire].astype(np.int16) - 1, 0).astype(np.uint8)
-            dead = fire & (self.life == 0)
+            self._wake_mask(fire, oy, ox)
+            life[fire] = np.maximum(life[fire].astype(np.int16) - 1, 0).astype(np.uint8)
+            dead = fire & (life == 0)
             r = rng.random(mat.shape)
             mat[dead & (r < 0.25)] = M.SMOKE
-            self.life[dead & (r < 0.25)] = rng.integers(40, 120)
+            life[dead & (r < 0.25)] = rng.integers(40, 120)
             mat[dead & (r >= 0.25)] = M.EMPTY
 
         # ignition: anything flammable next to heat
-        hot = self._hot_mask()
-        near_hot = (shift(hot, 1, 0, False) | shift(hot, -1, 0, False) |
-                    shift(hot, 0, 1, False) | shift(hot, 0, -1, False))
+        hot = fire | (mat == M.LAVA) | (burn > 0)
+        near_hot = (self._bshift(hot, 1, 0) | self._bshift(hot, -1, 0) |
+                    self._bshift(hot, 0, 1) | self._bshift(hot, 0, -1))
+        # heat agitates settled fluids so fuel keeps flowing toward flames
+        self.v_rest[near_hot | hot] = 0
         flam = M.FLAMMABLE[mat]
         roll = rng.random(mat.shape)
-        ignite = near_hot & (flam > 0) & (roll < flam) & (self.burn == 0)
+        ignite = near_hot & (flam > 0) & (roll < flam) & (burn == 0)
         if ignite.any():
+            self._wake_mask(ignite, oy, ox)
             det = ignite & ((mat == M.EXPOWDER) | (mat == M.NITRO))
             if det.any():
                 ys, xs = np.nonzero(det)
                 # queue a handful per tick; the rest chain later
                 for i in range(min(len(ys), 4)):
-                    self.pending_detonations.append((int(xs[i]), int(ys[i]),
-                                                     int(mat[ys[i], xs[i]])))
+                    self.pending_detonations.append(
+                        (ox + int(xs[i]), oy + int(ys[i]),
+                         int(mat[ys[i], xs[i]])))
                     mat[ys[i], xs[i]] = M.FIRE
-                    self.life[ys[i], xs[i]] = 30
+                    life[ys[i], xs[i]] = 30
             gasify = ignite & (mat == M.GAS)
             mat[gasify] = M.FIRE
-            self.life[gasify] = rng.integers(20, 50)
+            life[gasify] = rng.integers(20, 50)
             rest = ignite & (M.BURN_FUEL[mat] > 0)
-            self.burn[rest] = 1
-            self.life[rest] = M.BURN_FUEL[mat[rest]]
+            burn[rest] = 1
+            life[rest] = M.BURN_FUEL[mat[rest]]
 
         # burning cells: emit fire above, lose fuel, die to residue
-        burning = self.burn > 0
+        burning = burn > 0
         if burning.any():
-            self._wake_mask(burning)
+            self._wake_mask(burning, oy, ox)
             up = -self.gravity_dir
-            above_empty = shift(mat, up, 0, M.BEDROCK) == M.EMPTY
+            above_empty = self._bshift(mat == M.EMPTY, up, 0)
             emit = burning & above_empty & (rng.random(mat.shape) < 0.22)
+            emit[0 if up < 0 else -1, :] = False
             ys, xs = np.nonzero(emit)
             if len(ys):
                 mat[ys + up, xs] = M.FIRE
-                self.life[ys + up, xs] = rng.integers(25, 70, len(ys)).astype(np.uint8)
-            self.life[burning] = np.maximum(self.life[burning].astype(np.int16) - 1, 0).astype(np.uint8)
+                life[ys + up, xs] = rng.integers(25, 70, len(ys)).astype(np.uint8)
+            life[burning] = np.maximum(life[burning].astype(np.int16) - 1, 0).astype(np.uint8)
             # liquids burn away faster
             consumed = burning & (M.PHASE[mat] == M.P_LIQUID) & \
                        (rng.random(mat.shape) < 0.03)
             mat[consumed] = M.FIRE
-            self.life[consumed] = 40
-            self.burn[consumed] = 0
-            done = (self.burn > 0) & (self.life == 0)
+            life[consumed] = 40
+            burn[consumed] = 0
+            done = (burn > 0) & (life == 0)
             res = M.BURN_RESIDUE[mat[done]]
             mat[done] = res
-            self.burn[done] = 0
-            self.life[done] = np.where(res == M.TOXGAS, 160, 0).astype(np.uint8)
+            burn[done] = 0
+            life[done] = np.where(res == M.TOXGAS, 160, 0).astype(np.uint8)
             # water next to burning puts it out
-            water_near = (shift(mat == M.WATER, 1, 0, False) |
-                          shift(mat == M.WATER, -1, 0, False) |
-                          shift(mat == M.WATER, 0, 1, False) |
-                          shift(mat == M.WATER, 0, -1, False))
-            doused = (self.burn > 0) & water_near
-            self.burn[doused] = 0
+            water = mat == M.WATER
+            water_near = (self._bshift(water, 1, 0) | self._bshift(water, -1, 0) |
+                          self._bshift(water, 0, 1) | self._bshift(water, 0, -1))
+            doused = (burn > 0) & water_near
+            burn[doused] = 0
 
     def _acid_pass(self):
-        mat, rng = self.mat, self.rng
+        mat, rng = self.v_mat, self.rng
+        oy, ox = self._ry0, self._rx0
         acid = mat == M.ACID
         if not acid.any():
             return
         roll = rng.random(mat.shape)
+        # only freshly disturbed acid corrodes; settled pools turn inert
+        # (and therefore cheap) until an explosion or flow stirs them up
+        fresh = self.v_rest < self.REST_K
         for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            acid = mat == M.ACID
+            acid = (mat == M.ACID) & fresh
+            if not acid.any():
+                break
             nb = shift(mat, dy, dx, M.BEDROCK)
-            eat = acid & (M.CORRODIBLE[nb] > 0) & (roll < M.CORRODIBLE[nb] * 0.5)
+            eat = acid & (M.CORRODIBLE[nb] > 0) & \
+                (roll < M.CORRODIBLE[nb] * 0.5)
             ys, xs = np.nonzero(eat)
             if len(ys) == 0:
                 continue
-            self.wake(int(xs.min()) - 2, int(ys.min()) - 2,
-                      int(xs.max()) + 2, int(ys.max()) + 2)
             ty, tx = ys + dy, xs + dx
             mat[ty, tx] = M.EMPTY
             # some acid is spent, sometimes leaving a toxic puff
@@ -360,43 +413,51 @@ class World:
             mat[ys[spend < 0.30], xs[spend < 0.30]] = M.EMPTY
             puff = spend > 0.93
             mat[ys[puff], xs[puff]] = M.TOXGAS
-            self.life[ys[puff], xs[puff]] = 140
+            self.v_life[ys[puff], xs[puff]] = 140
 
     def _water_lava_pass(self):
-        mat = self.mat
+        mat = self.v_mat
+        oy, ox = self._ry0, self._rx0
         water = mat == M.WATER
         lava = mat == M.LAVA
         if not (water.any() and lava.any()):
             return
-        lava_near = (shift(lava, 1, 0, False) | shift(lava, -1, 0, False) |
-                     shift(lava, 0, 1, False) | shift(lava, 0, -1, False))
+        lava_near = (self._bshift(lava, 1, 0) | self._bshift(lava, -1, 0) |
+                     self._bshift(lava, 0, 1) | self._bshift(lava, 0, -1))
         boil = water & lava_near
-        self._wake_mask(boil)
-        mat[boil] = M.STEAM
-        self.life[boil] = 180
-        water_near = (shift(water, 1, 0, False) | shift(water, -1, 0, False) |
-                      shift(water, 0, 1, False) | shift(water, 0, -1, False))
+        if boil.any():
+            self._wake_mask(boil, oy, ox)
+            mat[boil] = M.STEAM
+            self.v_life[boil] = 180
+        water_near = (self._bshift(water, 1, 0) | self._bshift(water, -1, 0) |
+                      self._bshift(water, 0, 1) | self._bshift(water, 0, -1))
         quench = lava & water_near
         mat[quench] = M.STONE
-        self.shade[quench] = 0  # dark obsidian look
-        self.temp[quench] = 80
+        self.v_shade[quench] = 0  # dark obsidian look
+        self.v_temp[quench] = 80
 
     def _gas_life_pass(self):
-        mat = self.mat
+        # region-local: gas sealed away outside the region keeps (a feature —
+        # dig into an old pocket and it's still there), free gas dissipates
+        mat, life = self.v_mat, self.v_life
         fade = (mat == M.SMOKE) | (mat == M.STEAM) | (mat == M.TOXGAS)
+        if self.tick % 6 == 0:        # flammable gas fades much more slowly
+            fade |= mat == M.GAS
         if fade.any():
-            self.life[fade] = np.maximum(self.life[fade].astype(np.int16) - 1, 0).astype(np.uint8)
-            gone = fade & (self.life == 0)
+            life[fade] = np.maximum(life[fade].astype(np.int16) - 1, 0).astype(np.uint8)
+            gone = fade & (life == 0)
             if gone.any():
-                self._wake_mask(gone)
+                self._wake_mask(gone, self._ry0, self._rx0)
             mat[gone] = M.EMPTY
 
     def _temp_pass(self):
-        mat, t = self.mat, self.temp
+        mat, t = self.v_mat, self.v_temp
+        burn, life = self.v_burn, self.v_life
+        oy, ox = self._ry0, self._rx0
         # sources clamp temperature
         t[mat == M.LAVA] = 900.0
         np.maximum(t, 380.0, where=(mat == M.FIRE), out=t)
-        np.maximum(t, 300.0, where=(self.burn > 0), out=t)
+        np.maximum(t, 300.0, where=(burn > 0), out=t)
         np.minimum(t, -16.0, where=(mat == M.ICE), out=t)
         np.minimum(t, -8.0, where=(mat == M.SNOW), out=t)
         # diffuse
@@ -407,32 +468,35 @@ class World:
         # phase changes
         rng = self.rng
         roll = rng.random(mat.shape)
-        def become(src_mask, new_mat, life=0, p=1.0):
+        def become(src_mask, new_mat, life_v=0, p=1.0):
             m = src_mask if p >= 1.0 else (src_mask & (roll < p))
             if m.any():
-                self._wake_mask(m)
+                self._wake_mask(m, oy, ox)
                 mat[m] = new_mat
-                if life:
-                    self.life[m] = life
-                self.burn[m] = 0
+                if life_v:
+                    life[m] = life_v
+                burn[m] = 0
             return m
-        become((mat == M.WATER) & (t > 102), M.STEAM, life=200, p=0.4)
+        become((mat == M.WATER) & (t > 102), M.STEAM, life_v=200, p=0.4)
         become((mat == M.WATER) & (t < -6), M.ICE)
         become((mat == M.ICE) & (t > 18), M.WATER, p=0.3)
         become((mat == M.SNOW) & (t > 10), M.WATER, p=0.3)
         become((mat == M.STEAM) & (t < 40), M.WATER, p=0.03)
         become((mat == M.LAVA) & (t < 430), M.STONE)
-        hot_oil = (mat == M.OIL) & (t > 300) & (self.burn == 0)
-        self.burn[hot_oil] = 1
-        self.life[hot_oil] = M.BURN_FUEL[M.OIL]
+        hot_oil = (mat == M.OIL) & (t > 300) & (burn == 0)
+        if hot_oil.any():
+            self._wake_mask(hot_oil, oy, ox)
+            burn[hot_oil] = 1
+            life[hot_oil] = M.BURN_FUEL[M.OIL]
         boom = ((mat == M.NITRO) & (t > 210)) | ((mat == M.EXPOWDER) & (t > 280))
         if boom.any():
             ys, xs = np.nonzero(boom)
             for i in range(min(len(ys), 3)):
-                self.pending_detonations.append((int(xs[i]), int(ys[i]),
-                                                 int(mat[ys[i], xs[i]])))
+                self.pending_detonations.append(
+                    (ox + int(xs[i]), oy + int(ys[i]),
+                     int(mat[ys[i], xs[i]])))
                 mat[ys[i], xs[i]] = M.FIRE
-                self.life[ys[i], xs[i]] = 30
+                life[ys[i], xs[i]] = 30
 
     # ----------------------------------------------------------- explosions
     def explode(self, x, y, r, power, heat=120.0, make_fire=False,
@@ -459,6 +523,7 @@ class World:
                     })
             sub[destroy] = M.EMPTY
             self.burn[sy, sx][destroy] = 0
+            self.rest[sy, sx] = 0     # liquids around the crater wake up
             # heat + sparks of fire inside the blast
             self.temp[sy, sx] += heat * np.clip(1.0 - dist / max(r, 1), 0, 1) * 4
             if make_fire:
@@ -506,17 +571,20 @@ class World:
 
     # ---------------------------------------------------------------- step
     MARGIN = 6
+    REST_K = 30
 
     def step(self):
         self.tick += 1
         moves = 0
         box = self._wake_box
         self._wake_box = None
+        self.last_region = None
         if box is not None:
             y0 = max(0, box[0] - self.MARGIN)
             y1 = min(self.h, box[1] + self.MARGIN)
             x0 = max(0, box[2] - self.MARGIN)
             x1 = min(self.w, box[3] + self.MARGIN)
+            self.last_region = (y0, y1, x0, x1)
             self._ry0, self._rx0 = y0, x0
             sy, sx = slice(y0, y1), slice(x0, x1)
             # refresh the phase/density mirrors inside the region only;
@@ -527,6 +595,7 @@ class World:
             self.v_shade = self.shade[sy, sx]
             self.v_life = self.life[sy, sx]
             self.v_burn = self.burn[sy, sx]
+            self.v_rest = self.rest[sy, sx]
             self.v_temp = self.temp[sy, sx]
             self.v_phase = self.phase[sy, sx]
             self.v_dens = self.dens[sy, sx]
@@ -539,13 +608,19 @@ class World:
                 moves += self._liquid_pass(parity)
             self.v_moved[:] = 0
             moves += self._gas_pass(self.tick % 2 == 0)
-        self._fire_pass()
-        if self.tick % 2 == 0:
-            self._acid_pass()
-        self._water_lava_pass()
-        self._gas_life_pass()
-        if self.tick % 2 == 1:
-            self._temp_pass()
+            # every fluid cell ages toward rest; real flow resets the clock
+            ph = self.v_phase
+            fluid = (ph == M.P_LIQUID) | (ph == M.P_GAS)
+            inc = fluid & (self.v_rest < 255)
+            self.v_rest[inc] += 1
+            # reactions only happen where something is awake
+            self._fire_pass()
+            if self.tick % 2 == 0:
+                self._acid_pass()
+            self._water_lava_pass()
+            if self.tick % 2 == 1:
+                self._temp_pass()
+            self._gas_life_pass()
         self._run_detonations()
         self.activity = moves
 
@@ -553,7 +628,8 @@ class World:
     def to_bytes(self) -> bytes:
         payload = b"".join([
             self.mat.tobytes(), self.shade.tobytes(), self.life.tobytes(),
-            self.burn.tobytes(), self.temp.astype(np.float32).tobytes(),
+            self.burn.tobytes(), self.rest.tobytes(),
+            self.temp.astype(np.float32).tobytes(),
         ])
         return zlib.compress(payload, 6)
 
@@ -564,4 +640,5 @@ class World:
         self.shade = np.frombuffer(raw[n:2*n], np.uint8).reshape(self.h, self.w).copy()
         self.life = np.frombuffer(raw[2*n:3*n], np.uint8).reshape(self.h, self.w).copy()
         self.burn = np.frombuffer(raw[3*n:4*n], np.uint8).reshape(self.h, self.w).copy()
-        self.temp = np.frombuffer(raw[4*n:4*n+4*n], np.float32).reshape(self.h, self.w).copy()
+        self.rest = np.frombuffer(raw[4*n:5*n], np.uint8).reshape(self.h, self.w).copy()
+        self.temp = np.frombuffer(raw[5*n:5*n+4*n], np.float32).reshape(self.h, self.w).copy()

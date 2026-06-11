@@ -26,7 +26,10 @@ DEFAULT_SETTINGS = {
     "crt": 0.8, "bloom": 0.7, "shake": 1.0, "volume": 0.8,
     "reduce_flash": False, "colorblind": False, "aberration": True,
     "fullscreen": False, "server": "127.0.0.1:31999", "player_name": "Grub",
+    "fps_cap": 144, "show_fps": False, "render_scale": 3,
 }
+
+FPS_CAPS = [60, 120, 144, 240, 0]          # 0 = uncapped
 
 CONTROL_CYCLE = ["local", "bot:dumb", "bot:normal", "bot:tactical",
                  "bot:evil"]
@@ -104,7 +107,7 @@ class MainMenu(Screen):
         self.demo = app.demo
 
     def update(self, events):
-        self.demo.step()
+        self.app.step_demo()
 
     def draw(self, view):
         app = self.app
@@ -155,7 +158,7 @@ class LocalSetup(Screen):
         self.sd_minutes = 8
 
     def update(self, events):
-        self.app.demo.step()
+        self.app.step_demo()
 
     def biome_label(self):
         b = self.biomes[self.biome_i]
@@ -300,6 +303,14 @@ class GameScreen(Screen):
                     self.pending_click = (gx, gy)
         if self.paused:
             return
+        for _ in range(app.sim_steps):
+            self._tick_once()
+            self._jump = self._backflip = False
+            if app.screen is not self:          # match ended mid-frame
+                return
+
+    def _tick_once(self):
+        app = self.app
         g = self.game
         if g.phase == Game.PH_OVER:
             self.over_t += 1
@@ -415,8 +426,9 @@ class ResultsScreen(Screen):
         self.session = session
 
     def update(self, events):
-        self.game.step(None)
-        self.game.fx.clear()
+        for _ in range(self.app.sim_steps):
+            self.game.step(None)
+            self.game.fx.clear()
 
     def draw(self, view):
         app, ui = self.app, self.app.ui
@@ -451,7 +463,7 @@ class ResultsScreen(Screen):
 
 class OptionsScreen(Screen):
     def update(self, events):
-        self.app.demo.step()
+        self.app.step_demo()
 
     def draw(self, view):
         app, ui = self.app, self.app.ui
@@ -488,10 +500,37 @@ class OptionsScreen(Screen):
         if fs != s["fullscreen"]:
             s["fullscreen"] = fs
             app.apply_window()
-        y += 22
+        y += 18
+        s["show_fps"] = ui.toggle(view, (x, y, w // 2 - 4, 14), "Show FPS",
+                                  s["show_fps"])
+        cap = int(s.get("fps_cap", 144))
+        cap_label = "Uncapped" if cap == 0 else f"{cap} fps"
+        ui.selector(view, (x + w // 2 + 4, y - 9, w // 2 - 4, 22), "FPS CAP",
+                    cap_label, lambda: self._cycle_cap(-1),
+                    lambda: self._cycle_cap(1))
+        y += 18
+        scale = int(s.get("render_scale", 3))
+        ui.selector(view, (x, y - 4, w // 2 - 4, 22), "WINDOW SIZE",
+                    f"{GRID_W * scale}x{GRID_H * scale}",
+                    lambda: self._cycle_scale(-1), lambda: self._cycle_scale(1))
+        y += 24
         if ui.button(view, (GRID_W // 2 - 40, GRID_H - 28, 80, 16), "BACK"):
             save_settings(s)
             app.goto(MainMenu(app))
+
+    def _cycle_cap(self, d):
+        s = self.app.settings
+        cur = int(s.get("fps_cap", 144))
+        i = FPS_CAPS.index(cur) if cur in FPS_CAPS else 2
+        s["fps_cap"] = FPS_CAPS[(i + d) % len(FPS_CAPS)]
+
+    def _cycle_scale(self, d):
+        s = self.app.settings
+        scales = [2, 3, 4]
+        cur = int(s.get("render_scale", 3))
+        i = scales.index(cur) if cur in scales else 1
+        s["render_scale"] = scales[(i + d) % len(scales)]
+        self.app.apply_window()
 
 
 HELP_TEXT = [
@@ -512,7 +551,7 @@ HELP_TEXT = [
 
 class HelpScreen(Screen):
     def update(self, events):
-        self.app.demo.step()
+        self.app.step_demo()
 
     def draw(self, view):
         app, ui = self.app, self.app.ui
@@ -537,7 +576,7 @@ class OnlineMenu(Screen):
         self.error = ""
 
     def update(self, events):
-        self.app.demo.step()
+        self.app.step_demo()
 
     def draw(self, view):
         app, ui = self.app, self.app.ui
@@ -607,7 +646,7 @@ class SyncScreen(Screen):
         sess.request_snapshot()
 
     def update(self, events):
-        self.app.demo.step()
+        self.app.step_demo()
         self.t += 1
         self.sess.poll()
         snap = self.sess.pending_snapshot
@@ -645,7 +684,7 @@ class LobbyScreen(Screen):
         self.error = ""
 
     def update(self, events):
-        self.app.demo.step()
+        self.app.step_demo()
         msgs = self.sess.poll()
         for m in msgs:
             if m["t"] == "start":
@@ -722,27 +761,34 @@ class LobbyScreen(Screen):
 
 # ================================================================== app ====
 class App:
+    """Fixed 60 Hz simulation, render as fast as the cap allows. Screens
+    run their sims `app.sim_steps` times per rendered frame."""
     def __init__(self):
         pygame.init()
         pygame.display.set_caption("GRUBSTORM — every pixel is alive")
         self.settings = load_settings()
         self.screen_surf = None
+        self.crt = None
         self.apply_window()
         self.audio = Audio(self.settings)
         self.ui = UI(self.audio)
         self.renderer = Renderer(self.settings)
-        self.crt = CRT(self.settings)
         self.demo = MenuDemo()
         self.screen: Screen = MainMenu(self)
         self.running = True
         self.clock = pygame.time.Clock()
+        self.sim_steps = 1
+        self._acc = 0.0
+        self._fps_font = pygame.font.Font(None, 14)
 
     def apply_window(self):
+        scale = int(self.settings.get("render_scale", 3))
         flags = pygame.RESIZABLE
-        size = (VIEW_W, VIEW_H)
+        size = (GRID_W * scale, GRID_H * scale)
         if self.settings.get("fullscreen"):
             flags = pygame.FULLSCREEN | pygame.SCALED
         self.screen_surf = pygame.display.set_mode(size, flags)
+        self.crt = CRT(self.settings, scale)
 
     def goto(self, screen):
         self.screen = screen
@@ -750,8 +796,22 @@ class App:
     def quit(self):
         self.running = False
 
+    def step_demo(self):
+        for _ in range(self.sim_steps):
+            self.demo.step()
+
     def run(self):
         while self.running:
+            cap = int(self.settings.get("fps_cap", 144))
+            dt = self.clock.tick(cap) / 1000.0
+            # fixed-timestep accumulator: sim always runs at 60 Hz
+            self._acc += dt
+            self.sim_steps = 0
+            while self._acc >= 1 / 60 and self.sim_steps < 2:
+                self._acc -= 1 / 60
+                self.sim_steps += 1
+            if self._acc > 0.1:         # spiraled — drop the backlog rather
+                self._acc = 0.0         # than stutter (brief slow-mo instead)
             events = pygame.event.get()
             for e in events:
                 if e.type == pygame.QUIT:
@@ -760,9 +820,12 @@ class App:
             self.screen.update(events)
             view = self.renderer.view
             self.screen.draw(view)
+            if self.settings.get("show_fps"):
+                fps = self._fps_font.render(f"{self.clock.get_fps():.0f}",
+                                            True, (120, 255, 120))
+                view.blit(fps, (GRID_W - fps.get_width() - 2, GRID_H - 12))
             self.crt.present(view, self.screen_surf)
             pygame.display.flip()
-            self.clock.tick(60)
         save_settings(self.settings)
         pygame.quit()
 

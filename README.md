@@ -94,6 +94,27 @@ Genius — with real ballistic solving and personality-driven bad decisions.
 **Sandbox Lab:** paint any material, set things on fire, trigger explosions,
 and save experiments as playable maps (`O` key → appears in match setup).
 
+## Performance
+
+The simulation runs at a fixed deterministic 60 Hz; rendering is decoupled
+and runs as fast as your FPS cap allows (60 / 120 / 144 / 240 / uncapped in
+Options, default 144, with an FPS counter toggle). To make that possible:
+
+- the sim only processes an **active region** around things that are
+  actually moving, burning, corroding or reacting
+- fluids and gases **go to rest**: pools stop sloshing once settled and the
+  whole map drops to near-zero cost — explosions, heat, digging and fresh
+  flow wake them back up
+- the renderer caches composed cells/lighting and repaints only the dirty
+  rectangle on sim ticks; render-only frames just re-blit
+- the CRT pipeline is collapsed into one upscale, one multiply overlay
+  (mask + scanlines + vignette) and a low-res bloom pass
+
+On a modest CPU this lands at 160–240 fps in normal play and ~100+ fps in
+the middle of continuous multi-explosion chaos (sim frames briefly go
+slow-mo rather than stutter if the machine can't keep up). A smaller
+window size (Options → Window size) buys more headroom on weak machines.
+
 ## Presentation
 
 Everything renders into a 480×270 cell grid and goes through a CRT pipeline:
