@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GRUBSTORM relay server — pure stdlib, run it anywhere:
 
-    python3 server/relay.py [port]
+    grubstorm-server [port]
 
 Players create private rooms and share 4-letter codes. The server only
 relays messages; all simulation happens on the clients (deterministic

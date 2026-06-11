@@ -17,20 +17,32 @@ rocket is just the first domino.
 
 ## Quick start
 
+One command, no clone, no setup (needs [uv](https://docs.astral.sh/uv/)):
+
 ```bash
-pip install -r requirements.txt     # pygame-ce + numpy
-python -m grubstorm
+uvx --from git+https://github.com/alexgalkin94/worms-mythos grubstorm
 ```
+
+Working on the repo:
+
+```bash
+git clone https://github.com/alexgalkin94/worms-mythos && cd worms-mythos
+uv run grubstorm
+```
+
+(`uv` creates the venv, installs pinned deps from `uv.lock`, builds and runs.
+No uv? `pip install .` then `grubstorm` works too.)
 
 Local hot-seat: **Local Party → add teams (humans or bots) → pick an arena →
 START**. Pass the keyboard around.
 
 ### Play online with friends
 
-Someone runs the relay (any cheap VPS or a LAN machine, pure stdlib, no deps):
+Someone runs the relay (any cheap VPS or a LAN machine, pure stdlib):
 
 ```bash
-python server/relay.py            # listens on :31999
+uvx --from git+https://github.com/alexgalkin94/worms-mythos grubstorm-server
+# or in the repo: uv run grubstorm-server      # listens on :31999
 ```
 
 Everyone else: **Online → set the server address → Create Private Lobby** →
@@ -154,7 +166,7 @@ grubstorm/
   net.py        lockstep client
   ui.py/app.py  menus, screens, the cabinet
   sandbox.py    the lab
-server/relay.py room-code relay server (stdlib only)
+  relay.py      room-code relay server (stdlib only, `grubstorm-server`)
 ```
 
 Determinism contract: anything that affects game state must draw randomness
