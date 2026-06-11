@@ -71,7 +71,11 @@ class Renderer:
             top = np.array(spec.sky_top, np.float32)
             bot = np.array(spec.sky_bottom, np.float32)
             g = np.linspace(0, 1, GRID_H, dtype=np.float32)[:, None]
-            grad = (top[None, :] * (1 - g) + bot[None, :] * g).astype(np.uint8)
+            grad = top[None, :] * (1 - g) + bot[None, :] * g
+            # depth falloff: the lower you look, the darker the backdrop —
+            # caves opened under the surface read as dark, not as sunset
+            depth = 1.0 - 0.62 * g ** 1.6
+            grad = (grad * depth).astype(np.uint8)
             arr = np.repeat(grad[:, None, :], GRID_W, axis=1)
             surf = pygame.Surface((GRID_W, GRID_H))
             pygame.surfarray.blit_array(surf, arr.swapaxes(0, 1))
@@ -155,6 +159,7 @@ class Renderer:
                                       (240, 180, 60)], np.uint8)[fl]
         matT = (idxT >> 2).astype(np.uint8)
         phT = M.PHASE[matT]
+        self._edge_shade(world, rgbT, y0, y1, x0, x1)
         gasT = phT == M.P_GAS
         gas_rgb = rgbT.copy()
         gas_rgb[~gasT] = _KEY
@@ -165,6 +170,40 @@ class Renderer:
         pygame.surfarray.blit_array(self.em_surf.subsurface(rect),
                                     EMIT_FLAT[matT])
         return True
+
+    def _edge_shade(self, world, rgbT, y0, y1, x0, x1):
+        """Noita-style material edges: dark outline where terrain meets air,
+        a lit highlight on top surfaces, and a bright skin on liquids."""
+        h, w = world.h, world.w
+        ey0, ey1 = max(0, y0 - 1), min(h, y1 + 1)
+        ex0, ex1 = max(0, x0 - 1), min(w, x1 + 1)
+        ph = M.PHASE[world.mat[ey0:ey1, ex0:ex1]]
+        solid = ph >= M.P_POWDER
+        open_ = ph <= M.P_GAS
+        liquid = ph == M.P_LIQUID
+        above = np.zeros_like(open_)
+        above[1:] = open_[:-1]
+        above[0] = ey0 == 0                       # the sky counts as open
+        below = np.zeros_like(open_)
+        below[:-1] = open_[1:]
+        sides = np.zeros_like(open_)
+        sides[:, 1:] |= open_[:, :-1]
+        sides[:, :-1] |= open_[:, 1:]
+        top_lit = solid & above
+        outline = solid & (below | sides) & ~top_lit
+        skin = liquid & above
+        # crop the context window back to the write rect, transposed
+        oy, ox = y0 - ey0, x0 - ex0
+        sl = (slice(oy, oy + (y1 - y0)), slice(ox, ox + (x1 - x0)))
+        top_litT = top_lit[sl].T
+        outlineT = outline[sl].T
+        skinT = skin[sl].T
+        v = rgbT[top_litT].astype(np.uint16)
+        rgbT[top_litT] = np.minimum(v + (v >> 2) + 16, 255).astype(np.uint8)
+        v = rgbT[outlineT].astype(np.uint16)
+        rgbT[outlineT] = ((v * 130) >> 8).astype(np.uint8)
+        v = rgbT[skinT].astype(np.uint16)
+        rgbT[skinT] = np.minimum(v + (v >> 2) + 10, 255).astype(np.uint8)
 
     def _rebuild_light(self, world, spec, projectiles=()):
         """Blurred glow from the emission surface + cave darkness."""
@@ -205,28 +244,52 @@ class Renderer:
 
     def _draw_grub(self, game, g, active):
         v = self.view
-        x, y = int(g.x), int(g.y)
+        x, y = g.x, g.y
         col = self.team_color(g.team)
-        bounce = math.sin(g.anim) * 0.8 if abs(g.vx) > 0.01 else 0
-        body = pygame.Rect(x - 3, y - 3 + bounce, 6, 6)
-        # body: pale blob with team bandana
-        skin = (225, 205, 170)
+        f = g.facing
+        wig = math.sin(g.anim) * 0.6 if abs(g.vx) > 0.01 else \
+            math.sin(self._t * 0.05 + g.x) * 0.25      # idle breathing
+        # skin tints for status
+        skin = (226, 162, 144)
+        belly = (246, 200, 178)
         if g.poisoned:
-            skin = (170, 210, 140)
+            skin, belly = (160, 198, 124), (196, 226, 160)
         if g.shock_t > 0 and (self._t // 2) % 2:
-            skin = (255, 255, 160)
+            skin, belly = (255, 255, 170), (255, 255, 210)
         if g.burn_t > 0 and (self._t // 3) % 2:
-            skin = (255, 160, 90)
-        pygame.draw.ellipse(v, (40, 30, 30), body.inflate(2, 2))
-        pygame.draw.ellipse(v, skin, body)
-        pygame.draw.rect(v, col, (x - 3, y - 4 + bounce, 6, 2))   # bandana
-        knot_x = x - g.facing * 3
-        pygame.draw.rect(v, col, (knot_x, y - 5 + bounce, 2, 2))
-        # eyes
-        ex = x + g.facing * 1
-        pygame.draw.rect(v, (255, 255, 255), (ex - 1, y - 2 + bounce, 2, 2))
-        pygame.draw.rect(v, (10, 10, 20), (ex + (0 if g.facing < 0 else 0),
-                                           y - 2 + bounce, 1, 2))
+            skin, belly = (255, 150, 80), (255, 190, 120)
+        outline = (44, 22, 30)
+        # an actual worm: segmented body curling up from the tail to a
+        # raised head, leaning into the facing direction
+        tilt = -math.sin(g.aim) * 0.6 if active else 0.0
+        segs = [
+            (x - f * 2.7, y + 2.2, 1.4),                  # tail
+            (x - f * 1.7, y + 1.8 + wig * 0.4, 1.7),
+            (x - f * 0.6, y + 0.9 - wig * 0.4, 1.9),
+            (x + f * 0.3, y - 0.5 + wig * 0.3, 1.9),
+        ]
+        hx = x + f * 0.9
+        hy = y - 2.4 + tilt
+        for px, py, r in segs:                            # dark rim first
+            pygame.draw.circle(v, outline, (px, py), r + 0.8)
+        pygame.draw.circle(v, outline, (hx, hy), 3.0)
+        for px, py, r in segs:
+            pygame.draw.circle(v, skin, (px, py), r)
+        for px, py, r in segs[1:]:                        # belly highlight
+            pygame.draw.circle(v, belly, (px + f * 0.5, py + 0.5), r - 0.9)
+        pygame.draw.circle(v, skin, (hx, hy), 2.2)
+        pygame.draw.circle(v, belly, (hx + f * 0.6, hy + 0.7), 1.0)
+        # team bandana: slim headband under the eyes, knot trailing behind
+        pygame.draw.rect(v, col, (hx - 2.4, hy - 0.4, 5, 1.6))
+        kx = hx - f * 2.8
+        pygame.draw.line(v, col, (kx, hy - 0.4), (kx - f, hy + 1.2), 1)
+        # two big googly worm eyes above the band, pupils follow the aim
+        pdy = 2 if g.aim > 0.35 else 0 if g.aim < -0.35 else 1
+        pdx = 1 if f > 0 else 0
+        for k in (-1, 1):
+            ex = hx + f * 0.6 + k * 1.5 - 1
+            pygame.draw.rect(v, (250, 250, 252), (ex, hy - 3.8, 2, 3))
+            v.set_at((int(ex + pdx), int(hy - 3.8 + pdy)), (16, 12, 22))
         if g.chute and not g.on_ground:
             pygame.draw.arc(v, col, (x - 7, y - 14, 14, 12), 0, math.pi, 2)
             pygame.draw.line(v, (200, 200, 200), (x - 6, y - 8), (x, y - 2))

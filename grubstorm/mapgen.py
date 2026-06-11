@@ -194,8 +194,8 @@ def _gen_island(world, rng):
     _grass_tops(world)
     _barrels(world, rng, 4)
     _ocean(world)
-    return MapSpec("island", world, sky_top=(70, 130, 200),
-                   sky_bottom=(255, 180, 120), ambient=22, decor="clouds",
+    return MapSpec("island", world, sky_top=(36, 62, 110),
+                   sky_bottom=(196, 110, 74), ambient=22, decor="clouds",
                    light=1.0)
 
 
@@ -217,8 +217,8 @@ def _gen_volcano(world, rng):
     _pockets(world, rng, 4, M.GAS, 5, 9, int(h * 0.5), h - 30)
     world.mat[(_fbm(rng, h, w, 24, 2) > 0.74) & (yy > surf[None, :])] = M.GRAVEL
     _ocean(world, 12, M.LAVA)
-    return MapSpec("volcano", world, sky_top=(30, 12, 20),
-                   sky_bottom=(120, 40, 25), ambient=36, flood_mat=M.LAVA,
+    return MapSpec("volcano", world, sky_top=(22, 8, 14),
+                   sky_bottom=(96, 30, 20), ambient=36, flood_mat=M.LAVA,
                    decor="embers", light=0.85)
 
 
@@ -255,8 +255,8 @@ def _gen_tundra(world, rng):
     _pockets(world, rng, 6, M.WATER, 6, 12, int(h * 0.6), h - 26)
     _pockets(world, rng, 3, M.CRYSTAL, 4, 7, int(h * 0.55), h - 30)
     _ocean(world)
-    return MapSpec("tundra", world, sky_top=(16, 24, 44),
-                   sky_bottom=(120, 160, 200), ambient=-12, decor="snow",
+    return MapSpec("tundra", world, sky_top=(12, 18, 36),
+                   sky_bottom=(86, 118, 156), ambient=-12, decor="snow",
                    light=0.95)
 
 
@@ -273,8 +273,8 @@ def _gen_desert(world, rng):
     _pockets(world, rng, 4, M.GAS, 5, 8, int(h * 0.55), h - 30)
     _barrels(world, rng, 3)
     _ocean(world)
-    return MapSpec("desert", world, sky_top=(120, 70, 40),
-                   sky_bottom=(250, 180, 90), ambient=34, decor="dust",
+    return MapSpec("desert", world, sky_top=(64, 38, 28),
+                   sky_bottom=(180, 122, 64), ambient=34, decor="dust",
                    light=1.05)
 
 
@@ -318,8 +318,8 @@ def _gen_junkyard(world, rng):
     _pockets(world, rng, 3, M.GAS, 4, 8, int(h * 0.4), h - 40)
     _grass_tops(world)
     _ocean(world, 12, M.SLUDGE)
-    return MapSpec("junkyard", world, sky_top=(40, 30, 30),
-                   sky_bottom=(140, 100, 70), ambient=20, flood_mat=M.SLUDGE,
+    return MapSpec("junkyard", world, sky_top=(26, 20, 22),
+                   sky_bottom=(92, 66, 48), ambient=20, flood_mat=M.SLUDGE,
                    decor="dust", light=0.8)
 
 
@@ -390,8 +390,8 @@ def _gen_candy(world, rng):
     _pockets(world, rng, 8, M.SLIME, 5, 11, int(h * 0.5), h - 26, solid_only=False)
     _pockets(world, rng, 4, M.MAGIC, 4, 8, int(h * 0.55), h - 26)
     _ocean(world, 12, M.SLIME)
-    return MapSpec("candy", world, sky_top=(60, 24, 60),
-                   sky_bottom=(255, 150, 200), ambient=22, flood_mat=M.SLIME,
+    return MapSpec("candy", world, sky_top=(38, 14, 42),
+                   sky_bottom=(176, 96, 140), ambient=22, flood_mat=M.SLIME,
                    decor="bubbles", light=0.95)
 
 
