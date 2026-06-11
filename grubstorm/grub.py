@@ -137,14 +137,13 @@ class Grub:
         if ground and abs(self.vy) < 1.2:
             if self.flying and abs(self.vx) < 0.4:
                 self.flying = False
-            # landing: fall damage
-            if not self.on_ground and self.fall_peak_vy > FALL_DMG_MIN_VY \
-                    and not in_liquid:
-                dmg = (self.fall_peak_vy - FALL_DMG_MIN_VY) * FALL_DMG_SCALE
-                self.hurt(dmg, game)
-                game.fx_event("thud", self.x, self.y, dmg)
-            self.on_ground = True
-            self.chute = False
+            if not self.on_ground:                # landing transition
+                if self.fall_peak_vy > FALL_DMG_MIN_VY and not in_liquid:
+                    dmg = (self.fall_peak_vy - FALL_DMG_MIN_VY) * FALL_DMG_SCALE
+                    self.hurt(dmg, game)
+                    game.fx_event("thud", self.x, self.y, dmg)
+                self.chute = False                # folds on touchdown only,
+            self.on_ground = True                 # so it can be pre-armed
             self.fall_peak_vy = 0.0
             self.vy = 0.0
             self.vx *= 0.99 if slippery else 0.6

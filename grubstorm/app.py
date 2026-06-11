@@ -296,6 +296,10 @@ class GameScreen(Screen):
                     self._backflip = True
                 elif e.key == pygame.K_TAB:
                     self.panel_open = not self.panel_open
+            elif e.type == pygame.MOUSEWHEEL:
+                if self.panel_open:
+                    self.panel_scroll = getattr(self, "panel_scroll", 0) - \
+                        e.y * 20
             elif e.type == pygame.MOUSEBUTTONDOWN:
                 if e.button == 3:
                     self.panel_open = not self.panel_open
@@ -389,37 +393,68 @@ class GameScreen(Screen):
         app, ui = self.app, self.app.ui
         g = self.game
         team = g.current_team()
-        ui.panel(view, (GRID_W - 150, 18, 144, GRID_H - 40), "ARSENAL")
+        panel = pygame.Rect(GRID_W - 150, 14, 144, GRID_H - 28)
+        ui.panel(view, panel, "ARSENAL")
+        inner = pygame.Rect(panel.x + 4, panel.y + 22, panel.w - 10,
+                            panel.h - 28)
         cats = [("boom", "BOOM"), ("chem", "CHEMISTRY"),
                 ("energy", "ENERGY"), ("super", "SUPER"), ("move", "MOVE")]
-        y = 38
         mine = not g.teams[g.turn_team].control.startswith("net:") or \
             (self.session and
              g.teams[g.turn_team].control == f"net:{self.session.pid}")
+        # flat row list, then a scrolling window over it
+        rows = []
         for ckey, clabel in cats:
-            ui.label(view, GRID_W - 144, y, clabel, ACCENT, ui.font)
-            y += 9
+            rows.append(("cat", clabel))
             for i, w in enumerate(WEAPONS):
-                if w.category != ckey:
-                    continue
-                ammo = team.ammo.get(i, 0)
-                if ammo == 0:
-                    continue
-                ammo_s = "" if ammo < 0 else f" x{ammo}"
-                sel = i == g.weapon
-                r = pygame.Rect(GRID_W - 144, y, 136, 9)
-                hov = r.collidepoint(ui.mx, ui.my)
-                if sel:
-                    pygame.draw.rect(view, (60, 45, 25), r)
-                elif hov:
-                    pygame.draw.rect(view, (40, 40, 60), r)
-                col = ACCENT if sel else (FG if hov else DIM)
-                ui.label(view, r.x + 2, y + 1, w.name + ammo_s, col, ui.font)
-                if hov and ui.clicked and mine:
-                    self.pending_weapon = i
-                    self.panel_open = False
-                y += 9
-            y += 4
+                if w.category == ckey and team.ammo.get(i, 0) != 0:
+                    rows.append(("w", i))
+            rows.append(("gap", None))
+        row_h = 10
+        content_h = len(rows) * row_h
+        max_scroll = max(0, content_h - inner.h)
+        self.panel_scroll = max(0, min(getattr(self, "panel_scroll", 0),
+                                       max_scroll))
+        view.set_clip(inner)
+        y = inner.y - self.panel_scroll
+        for kind, payload in rows:
+            if y > inner.bottom:
+                break
+            if y + row_h >= inner.y:
+                if kind == "cat":
+                    ui.label(view, inner.x + 2, y + 2, payload, ACCENT,
+                             ui.font)
+                elif kind == "w":
+                    i = payload
+                    w = WEAPONS[i]
+                    ammo = team.ammo.get(i, 0)
+                    ammo_s = "" if ammo < 0 else f" x{ammo}"
+                    sel = i == g.weapon
+                    r = pygame.Rect(inner.x, y, inner.w - 4, row_h)
+                    hov = r.collidepoint(ui.mx, ui.my)
+                    if sel:
+                        pygame.draw.rect(view, (52, 38, 18), r)
+                    elif hov:
+                        pygame.draw.rect(view, (36, 30, 24), r)
+                    col = ACCENT if sel else (FG if hov else DIM)
+                    ui.label(view, r.x + 3, y + 2, w.name + ammo_s, col,
+                             ui.font)
+                    if hov and ui.clicked and mine:
+                        self.pending_weapon = i
+                        self.panel_open = False
+            y += row_h
+        view.set_clip(None)
+        # scrollbar
+        if max_scroll > 0:
+            track = pygame.Rect(panel.right - 5, inner.y, 3, inner.h)
+            pygame.draw.rect(view, (30, 26, 20), track)
+            knob_h = max(8, inner.h * inner.h // content_h)
+            knob_y = track.y + (track.h - knob_h) * self.panel_scroll // max_scroll
+            pygame.draw.rect(view, (150, 124, 78),
+                             (track.x, knob_y, 3, knob_h))
+            hint = ui.font.render("scroll", True, DIM)
+            view.blit(hint, (panel.centerx - hint.get_width() // 2,
+                             panel.bottom - 9))
 
 
 class ResultsScreen(Screen):

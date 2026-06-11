@@ -130,6 +130,7 @@ class Game:
         self.entities: list = []
         self.crates: list[Crate] = []
         self.fx: list[tuple] = []             # (kind, x, y, mag) for AV layer
+        self.tracers: list[list] = []         # [x0, y0, x1, y1, ttl, color]
         self.headstones: list[tuple] = []
 
         # teams
@@ -209,6 +210,11 @@ class Game:
     def fx_event(self, kind, x, y, mag=1):
         if len(self.fx) < 300:
             self.fx.append((kind, float(x), float(y), float(mag)))
+
+    def add_tracer(self, x0, y0, x1, y1, ttl, color):
+        if len(self.tracers) < 80:
+            self.tracers.append([float(x0), float(y0), float(x1), float(y1),
+                                 int(ttl), color])
 
     def spawn_trail(self, p):
         if p.trail == "smoke":
@@ -414,6 +420,16 @@ class Game:
         w.step()
         self.particles.step(w)
         self._consume_world_events()
+        for tr in self.tracers:
+            tr[4] -= 1
+        self.tracers = [tr for tr in self.tracers if tr[4] > 0]
+        # blowtorch/drill are hold-to-dig: releasing FIRE stops them
+        if inp is not None and not inp.fire:
+            from .weapons import Stream
+            for e in self.entities:
+                if isinstance(e, Stream) and e.kind in ("torch", "drill") \
+                        and e.grub is self.active_grub:
+                    e.alive = False
 
         # entities & projectiles always simulate
         self.projectiles = [p for p in self.projectiles if p.update(self)]
@@ -437,16 +453,19 @@ class Game:
         active = self.active_grub
         if self.phase == Game.PH_ACTIVE and active is not None and active.alive:
             self._handle_input(inp)
+        elif self.phase == Game.PH_RETREAT and active is not None and \
+                active.alive and inp is not None:
+            self._handle_retreat_input(inp)
         for g in self.all_grubs():
             is_active = (g is active and self.phase in
                          (Game.PH_ACTIVE, Game.PH_RETREAT))
             g.update(self, inp if is_active else None, is_active)
 
         # camera focus: follow flying projectiles, then the active grub
-        if self.projectiles:
-            p = self.projectiles[-1]
-            if not p.resting:
-                self.focus = (p.x, p.y)
+        flying = [p for p in self.projectiles
+                  if not p.resting and not p.passive]
+        if flying:
+            self.focus = (flying[-1].x, flying[-1].y)
         elif active is not None and active.alive and \
                 self.phase in (Game.PH_ACTIVE, Game.PH_RETREAT, Game.PH_START):
             self.focus = (active.x, active.y)
@@ -472,7 +491,8 @@ class Game:
                 self._begin_resolve()
         elif self.phase == Game.PH_RESOLVE:
             self.settle_t += 1
-            busy = (self.projectiles or self.entities or
+            live_proj = any(not p.passive for p in self.projectiles)
+            busy = (live_proj or self.entities or
                     w.activity > 60 or len(w.pending_detonations) > 0)
             if not busy or self.settle_t > SETTLE_TIMEOUT * 60:
                 self.phase = Game.PH_TURNEND
@@ -480,7 +500,8 @@ class Game:
                 self._turn_end_chores()
         elif self.phase == Game.PH_TURNEND:
             self.phase_t -= 1
-            busy = self.projectiles or w.activity > 80
+            busy = any(not p.passive for p in self.projectiles) or \
+                w.activity > 80
             if self.phase_t <= 0 and not busy:
                 self._next_turn()
 
@@ -535,6 +556,18 @@ class Game:
             if fire_pressed:
                 self._fire(spec, 0.6, getattr(self, "_homing_target", None))
 
+    def _handle_retreat_input(self, inp):
+        """While retreating you may still use movement tools: deploy the
+        parachute, fire the rope, toggle the jetpack."""
+        if inp.weapon >= 0 and inp.weapon < len(WEAPONS) and \
+                not WEAPONS[inp.weapon].ends_turn and \
+                self.current_team().ammo.get(inp.weapon, 0) != 0:
+            self.weapon = inp.weapon
+        spec = WEAPONS[self.weapon]
+        fire_pressed = inp.fire and not self.prev_fire
+        if fire_pressed and not spec.ends_turn:
+            self._fire(spec, 0.6, None)
+
     def _fire(self, spec, power, click):
         g = self.active_grub
         team = self.current_team()
@@ -542,13 +575,16 @@ class Game:
         if team.ammo.get(self.weapon, 0) == 0:
             return
         angle = g.aim if g.facing == 1 else math.pi - g.aim
-        spec.fire_fn(self, g, angle, power, click)
+        if spec.fire_fn(self, g, angle, power, click) is False:
+            return                # blocked teleport etc: nothing is spent
         self._homing_target = None
         self.fx_event("fire_" + spec.key, g.x, g.y, 1)
         # switching the jetpack OFF refunds nothing because it costs nothing
         if spec.key == "jetpack" and not g.jetpack:
             return
-        if team.ammo.get(self.weapon, 0) > 0:
+        # multi-shot weapons (shotgun) cost one ammo for the whole turn
+        if team.ammo.get(self.weapon, 0) > 0 and \
+                (spec.shots == 1 or self._shots_fired == 0):
             team.ammo[self.weapon] -= 1
         if spec.ends_turn:
             self.fired_this_turn = True
@@ -567,7 +603,8 @@ class Game:
         player (no in-flight callbacks to serialize)."""
         # PH_START only: bots haven't begun planning yet, so a freshly
         # restored client's bot RNG usage stays in sync with everyone else's
-        return (not self.projectiles and not self.entities and
+        return (all(p.passive for p in self.projectiles) and
+                not self.entities and
                 not self.particles.alive.any() and
                 self.phase == Game.PH_START and
                 not self.world.pending_detonations)
@@ -590,6 +627,8 @@ class Game:
             "rng": [rs[0], list(rs[1]), rs[2]],
             "nprng": self.world.rng.bit_generator.state,
             "headstones": [list(h) for h in self.headstones],
+            "mines": [[p.x, p.y, p.vx, p.vy, p.age]
+                      for p in self.projectiles if p.passive],
             "crates": [[c.x, c.y, c.vy, c.kind, c.landed] for c in self.crates],
             "fired": self.fired_this_turn, "prev_fire": self.prev_fire,
             "active": None,
@@ -664,7 +703,13 @@ class Game:
                 g.damage_taken_turn = gd["dmg_turn"]
                 g.magic_cd = gd["magic_cd"]
         self.projectiles.clear(); self.entities.clear()
+        from .weapons import make_mine
+        for mx, my, mvx, mvy, mage in snap.get("mines", []):
+            m = make_mine(mx, my, mvx, mvy)
+            m.age, m.resting, m.passive = mage, True, True
+            self.projectiles.append(m)
         self.particles = Particles()
+        self.tracers = []
         a = snap["active"]
         self.active_grub = self.teams[a[0]].grubs[a[1]] if a else None
         self.charging = False

@@ -367,6 +367,15 @@ class Renderer:
     def _draw_entities(self, game):
         v = self.view
         from .weapons import BlackHole, Stream
+        for (x0, y0, x1, y1, ttl, col) in game.tracers:
+            pygame.draw.line(v, col, (x0, y0), (x1, y1), 1)
+        # homing lock-on marker
+        tgt = getattr(game, "_homing_target", None)
+        if tgt is not None and (self._t // 10) % 2:
+            tx, ty = tgt
+            pygame.draw.circle(v, (255, 90, 90), (int(tx), int(ty)), 4, 1)
+            pygame.draw.line(v, (255, 90, 90), (tx - 6, ty), (tx - 3, ty))
+            pygame.draw.line(v, (255, 90, 90), (tx + 3, ty), (tx + 6, ty))
         for e in game.entities:
             if isinstance(e, BlackHole):
                 pygame.draw.circle(v, (10, 5, 20), (int(e.x), int(e.y)), 5)
@@ -446,6 +455,13 @@ class Renderer:
         pygame.draw.rect(v, (16, 16, 26),
                          (4, GRID_H - 16, wtxt.get_width() + 8, 12))
         v.blit(wtxt, (8, GRID_H - 14))
+        # homing needs a target first — say so
+        if spec.key == "homing" and \
+                getattr(game, "_homing_target", None) is None and \
+                game.phase == Game.PH_ACTIVE:
+            hint = self.font.render("click a target, then fire", True,
+                                    (160, 200, 220))
+            v.blit(hint, (8, GRID_H - 26))
         if game.charging:
             p = game.charge
             pygame.draw.rect(v, (20, 20, 30), (4, GRID_H - 26, 84, 8))

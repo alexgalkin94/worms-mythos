@@ -35,6 +35,7 @@ class Projectile:
         self.age = 0
         self.alive = True
         self.resting = False
+        self.passive = False      # armed & settled: doesn't block turn flow
 
     def explode(self, game):
         if not self.alive:
@@ -85,10 +86,13 @@ class Projectile:
             self.vy += (dy / d * sp - self.vy) * steer
 
         if self.proximity is not None and self.age > self.arm_delay:
+            if self.resting:
+                self.passive = True
             for gr in game.all_grubs():
                 if gr.alive and gr is not self.owner and \
                         math.hypot(gr.x - self.x, gr.y - self.y) < self.proximity:
                     self.fuse = min(self.fuse if self.fuse is not None else 40, 40)
+                    self.passive = False
                     break
 
         # substepped movement so fast shells never tunnel through walls
@@ -206,7 +210,7 @@ class Stream:
     def update(self, game):
         self.life -= 1
         g = self.grub
-        if self.life <= 0 or not g.alive:
+        if not self.alive or self.life <= 0 or not g.alive:
             self.alive = False
             return False
         w, rng = game.world, game.rng
@@ -230,25 +234,34 @@ class Stream:
                     if aim_dot > 0.92:
                         gr.knockback(dx * 0.35, dy * 0.35 - 0.08)
         elif self.kind == "freeze":
+            reach = 2
             for i in range(2, 60):
                 cx, cy = ox + dx * i, oy + dy * i
                 if w.is_solid(cx, cy):
                     break
+                reach = i
                 w.temp[int(cy), int(cx)] = -250.0
                 w.wake(cx - 1, cy - 1, cx + 1, cy + 1)
-                if rng.random() < 0.2:
+                if rng.random() < 0.25:
                     game.particles.spawn(cx, cy, dx * 0.5, dy * 0.5,
                                          M.SNOW, KIND_FX, 25)
+            game.add_tracer(ox, oy, ox + dx * reach, oy + dy * reach, 2,
+                            (170, 220, 255))
+            # chill only what the beam actually touches
             for gr in game.all_grubs():
-                if gr is not g and gr.alive and \
-                        math.hypot(gr.x - ox, gr.y - oy) < 55:
-                    gr.hurt(0.25, game)
+                if gr is g or not gr.alive:
+                    continue
+                t = (gr.x - ox) * dx + (gr.y - oy) * dy
+                if 0 < t < reach + 4:
+                    px, py = ox + dx * t, oy + dy * t
+                    if math.hypot(gr.x - px, gr.y - py) < 5:
+                        gr.hurt(0.3, game)
         elif self.kind == "spark":
             sp = 2.8
             a = ang + (rng.random() - 0.5) * 0.1
             game.particles.spawn(ox, oy, math.cos(a) * sp, math.sin(a) * sp,
                                  0, KIND_SPARK, 120)
-            game.shock_check(ox + dx * 10, oy + dy * 10, 12, 0.6)
+            game.shock_check(ox + dx * 10, oy + dy * 10, 12, 0.35)
         elif self.kind == "torch":
             # melt a tunnel in front of the grub and shuffle forward
             tx, ty = g.x + dx * 4, g.y + dy * 2
@@ -257,10 +270,20 @@ class Stream:
                 w.temp[int(ty), int(tx)] += 30
             if self.life % 3 == 0:
                 g._move_horizontal(w, g.facing * 0.5)
+            if self.life % 2 == 0:
+                game.particles.spawn(tx, ty, dx * 0.4,
+                                     dy * 0.4 - 0.2, M.FIRE, KIND_FX, 9)
             game.fx_event("torch", tx, ty, 1)
         elif self.kind == "drill":
             w.paint(g.x, g.y + 4, 4, M.EMPTY, mode="erase")
-            g.y += 0.5
+            # braced against the shaft walls: controlled descent, no
+            # freefall, no fall damage while the drill runs
+            g.vy = min(g.vy, 0.6)
+            g.fall_peak_vy = 0.0
+            if self.life % 2 == 0:
+                game.particles.spawn(g.x + (rng.random() - .5) * 4, g.y + 4,
+                                     (rng.random() - .5) * 0.8, -0.5,
+                                     M.SMOKE, KIND_FX, 12)
             game.fx_event("torch", g.x, g.y + 4, 1)
         return True
 
@@ -341,6 +364,7 @@ def fire_shotgun(game, grub, angle, power, click):
             gr.hurt(22, game)
             gr.knockback(math.cos(angle) * 0.9, math.sin(angle) * 0.9 - 0.2)
     game.apply_explosion(hx, hy, 4, 22)
+    game.add_tracer(x, y, hx, hy, 5, (255, 240, 180))
     game.fx_event("shot", x, y, 2)
 
 def fire_hammer(game, grub, angle, power, click):
@@ -351,15 +375,23 @@ def fire_hammer(game, grub, angle, power, click):
         if d < 9 and (gr.x - grub.x) * grub.facing >= -2:
             gr.hurt(18, game)
             gr.knockback(grub.facing * 1.8, -1.1)
+    f = grub.facing
+    for ang in (-0.9, -0.3, 0.3):
+        game.add_tracer(grub.x, grub.y,
+                        grub.x + f * 9 * math.cos(ang),
+                        grub.y + 9 * math.sin(ang), 6, (255, 220, 150))
     game.fx_event("swing", grub.x, grub.y, 2)
 
+def make_mine(x, y, vx=0.0, vy=0.0, owner=None):
+    return Projectile(x, y, vx, vy, owner=owner, bounce=0.3, fuse=None,
+                      life=10 ** 9, proximity=10, arm_delay=120,
+                      explode_r=10, explode_power=42, glyph="mine",
+                      color=(220, 60, 60))
+
+
 def fire_mine(game, grub, angle, power, click):
-    game.add_projectile(Projectile(grub.x + grub.facing * 4, grub.y - 2,
-                                   grub.facing * 0.5, -0.4, owner=grub,
-                                   bounce=0.3, fuse=None, life=60 * 60,
-                                   proximity=10, arm_delay=120, explode_r=10,
-                                   explode_power=42, glyph="mine",
-                                   color=(220, 60, 60)))
+    game.add_projectile(make_mine(grub.x + grub.facing * 4, grub.y - 2,
+                                  grub.facing * 0.5, -0.4, owner=grub))
 
 def fire_dynamite(game, grub, angle, power, click):
     game.add_projectile(Projectile(grub.x + grub.facing * 3, grub.y - 1,
@@ -535,8 +567,11 @@ TRANSMUTE_MAP = {
 
 def fire_transmuter(game, grub, angle, power, click):
     if not click:
-        return
+        return False
     cx, cy = click
+    if math.hypot(cx - grub.x, cy - grub.y) > 110:
+        game.fx_event("tic", grub.x, grub.y, 1)
+        return False
     w = game.world
     d = w._disk(cx, cy, 14)
     if d is None:
@@ -552,8 +587,11 @@ def fire_transmuter(game, grub, angle, power, click):
 
 def fire_liquefier(game, grub, angle, power, click):
     if not click:
-        return
+        return False
     cx, cy = click
+    if math.hypot(cx - grub.x, cy - grub.y) > 110:
+        game.fx_event("tic", grub.x, grub.y, 1)
+        return False
     w = game.world
     d = w._disk(cx, cy, 16)
     if d is None:
@@ -601,14 +639,16 @@ def fire_chute(game, grub, angle, power, click):
 
 def fire_teleport(game, grub, angle, power, click):
     if not click:
-        return
+        return False
     cx, cy = click
     w = game.world
-    if not grub.collides(w, cx, cy):
-        game.fx_event("teleport", grub.x, grub.y, 2)
-        grub.x, grub.y = float(cx), float(cy)
-        grub.vx = grub.vy = 0.0
-        game.fx_event("teleport", cx, cy, 2)
+    if grub.collides(w, cx, cy):
+        game.fx_event("tic", grub.x, grub.y, 1)
+        return False              # blocked: keep your ammo and your turn
+    game.fx_event("teleport", grub.x, grub.y, 2)
+    grub.x, grub.y = float(cx), float(cy)
+    grub.vx = grub.vy = 0.0
+    game.fx_event("teleport", cx, cy, 2)
 
 def fire_girder(game, grub, angle, power, click):
     if not click:
@@ -623,9 +663,10 @@ def fire_girder(game, grub, angle, power, click):
     w = game.world
     horizontal = abs(math.cos(angle)) > 0.5
     if horizontal:
-        w.mat[int(cy):int(cy) + 3, max(0, int(cx) - 14):int(cx) + 14] = M.STONE
+        sub = w.mat[int(cy):int(cy) + 3, max(0, int(cx) - 14):int(cx) + 14]
     else:
-        w.mat[max(0, int(cy) - 14):int(cy) + 14, int(cx):int(cx) + 3] = M.STONE
+        sub = w.mat[max(0, int(cy) - 14):int(cy) + 14, int(cx):int(cx) + 3]
+    sub[M.PHASE[sub] <= M.P_GAS] = M.STONE      # fill air only, entomb no one
     w.wake(cx - 16, cy - 16, cx + 16, cy + 16)
     game.fx_event("clank", cx, cy, 2)
 
@@ -702,9 +743,9 @@ WEAPONS = [
     WeaponSpec("girder", "Girder", "🌉", 2, fire_girder, target="click",
                desc="Instant bridge.", category="move"),
     WeaponSpec("torch", "Blowtorch", "🔦", 1, fire_blowtorch, ends_turn=True,
-               desc="Tunnel sideways.", category="move"),
+               desc="Hold FIRE to tunnel sideways.", category="move"),
     WeaponSpec("drill", "Drill", "⛏️", 1, fire_drill, ends_turn=True,
-               desc="Straight down. What could go wrong.", category="move"),
+               desc="Hold FIRE to dig down. Release to stop.", category="move"),
 ]
 
 W_BY_KEY = {w.key: i for i, w in enumerate(WEAPONS)}
