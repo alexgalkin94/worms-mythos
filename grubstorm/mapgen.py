@@ -49,6 +49,7 @@ class MapSpec:
         self.decor = kw.get("decor", "stars")          # bg particle theme
         self.light = kw.get("light", 1.0)              # ambient light level
         self.open_sky = kw.get("open_sky", True)       # airstrikes possible?
+        self.bodies = kw.get("bodies", [])             # rigid props (x,y,kind)
 
 
 BIOMES = [
@@ -160,6 +161,19 @@ def _find_spawns(world, n=16):
     return spawns
 
 
+def _place_props(world, rng, n=4):
+    """Scatter crates/planks/blocks on walkable ground."""
+    spots = _find_spawns(world, n=n + 6)
+    rng2 = np.random.default_rng(int(rng.integers(0, 2 ** 31)))
+    rng2.shuffle(spots)
+    kinds = ["crate", "crate", "plank", "block", "beam"]
+    out = []
+    for (x, y) in spots[:n]:
+        out.append((int(x), int(y) - 5,
+                    kinds[int(rng2.integers(0, len(kinds)))]))
+    return out
+
+
 def generate(biome: str, seed: int, w: int = GRID_W, h: int = GRID_H) -> MapSpec:
     rng = np.random.default_rng(seed ^ 0xB10B35)
     world = World(seed, w, h)
@@ -174,6 +188,7 @@ def generate(biome: str, seed: int, w: int = GRID_W, h: int = GRID_H) -> MapSpec
         fn = _GENERATORS.get(biome, _gen_island)
         spec = fn(world, rng)
     spec.spawns = _find_spawns(world)
+    spec.bodies = _place_props(world, rng)
     world.ambient = spec.ambient
     # let the freshly painted world have one full-grid wake
     world._wake_box = [0, h, 0, w]

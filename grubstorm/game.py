@@ -17,6 +17,7 @@ from .mapgen import generate
 from .grub import Grub
 from .particles import Particles, KIND_MAT, KIND_SPARK, KIND_FX
 from .weapons import WEAPONS, W_BY_KEY, Projectile, default_ammo
+from .bodies import RigidBody
 
 
 class InputFrame:
@@ -133,6 +134,8 @@ class Game:
         self.gravity_scale = self.spec.gravity_scale * \
             (0.45 if settings.get("low_gravity") else 1.0)
         self.particles = Particles()
+        self.bodies: list[RigidBody] = [
+            RigidBody(bx, by, kind) for (bx, by, kind) in self.spec.bodies]
         self.projectiles: list[Projectile] = []
         self.entities: list = []
         self.crates: list[Crate] = []
@@ -268,6 +271,15 @@ class Game:
                 nd = max(d, 2.0)
                 g.knockback((g.x - x) / nd * f * power * 0.045,
                             (g.y - y) / nd * f * power * 0.045 - f * 0.5)
+        for b in self.bodies:
+            d = math.hypot(b.x - x, b.y - y)
+            blast = r * 2.2
+            if d < blast:
+                f = max(0.0, 1 - d / blast)
+                nd = max(d, 2.0)
+                b.impulse((b.x - x) / nd * f * power * 0.05,
+                          (b.y - y) / nd * f * power * 0.05 - f * 0.4,
+                          dmg=power * f * 0.5)
         if not silentish:
             self.fx_event("boom", x, y, min(4.0, power / 25))
         self.focus = (x, y)
@@ -438,6 +450,7 @@ class Game:
             self.grav_flip_t -= 1
             if self.grav_flip_t == 0:
                 w.gravity_dir = 1
+        self.bodies = [b for b in self.bodies if b.update(self)]
         w.step()
         self.particles.step(w)
         self._consume_world_events()
@@ -650,6 +663,7 @@ class Game:
         # PH_START only: bots haven't begun planning yet, so a freshly
         # restored client's bot RNG usage stays in sync with everyone else's
         return (all(p.passive for p in self.projectiles) and
+                all(b.resting for b in self.bodies) and
                 not self.entities and
                 not self.particles.alive.any() and
                 self.phase == Game.PH_START and
@@ -675,6 +689,8 @@ class Game:
             "headstones": [list(h) for h in self.headstones],
             "mines": [[p.x, p.y, p.vx, p.vy, p.age]
                       for p in self.projectiles if p.passive],
+            "bodies": [[b.x, b.y, b.kind, b.hp, b.vx, b.vy, b.resting]
+                       for b in self.bodies],
             "crates": [[c.x, c.y, c.vy, c.kind, c.landed] for c in self.crates],
             "fired": self.fired_this_turn, "prev_fire": self.prev_fire,
             "active": None,
@@ -757,6 +773,17 @@ class Game:
             m.age, m.resting, m.passive = mage, True, True
             self.projectiles.append(m)
         self.particles = Particles()
+        self.bodies = []
+        for bx, by, kind, bhp, bvx, bvy, brest in snap.get("bodies", []):
+            b = RigidBody(bx, by, kind)
+            b.hp, b.vx, b.vy = bhp, bvx, bvy
+            b.resting = brest
+            # reclaim our cells from the restored world so the body doesn't
+            # mistake itself for terrain and self-destruct
+            b.written = [(cx, cy) for (cx, cy) in b._rect_cells()
+                         if self.world.in_bounds(cx, cy)
+                         and self.world.mat[cy, cx] == b.mat]
+            self.bodies.append(b)
         self.tracers = []
         a = snap["active"]
         self.active_grub = self.teams[a[0]].grubs[a[1]] if a else None

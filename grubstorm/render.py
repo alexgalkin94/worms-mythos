@@ -661,7 +661,7 @@ class Renderer:
                 audio.play("warp", 0.9)
             elif kind == "chime":
                 audio.play("pickup", 0.5)
-            elif kind in ("swing", "clank"):
+            elif kind in ("swing", "clank", "crack"):
                 audio.play("thud", 0.6)
             elif kind == "bubble":
                 audio.play("bubble", 0.3)
