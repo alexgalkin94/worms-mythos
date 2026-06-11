@@ -154,6 +154,19 @@ modeled on how real tubes actually display pixel art — the pixels melt:
 All of it on sliders/toggles in Options (CRT at 0 = clean pixels), with a
 reduced-flashing mode and colorblind-friendly team palettes.
 
+## Music
+
+The soundtrack is composed at runtime — every launch writes new pieces from
+real harmony (curated chord progressions, pentatonic call-and-response
+melodies) and renders them through hand-built synths tuned to sound organic:
+five-voice detuned analog pads with slow drift and tremolo, Karplus-Strong
+physical string plucks, a breathy lead with delayed vibrato, inharmonic FM
+bells, a heartbeat kick — all humanized (timing/velocity jitter, rests) and
+glued by a seamless loop reverb (circular FFT convolution, so the final
+bar's tail blooms into the first). Menus get the main theme; each arena gets
+a mood (warm / cold / dark / deep) that crossfades in. Music and SFX have
+separate volume sliders.
+
 ## Repository layout
 
 ```

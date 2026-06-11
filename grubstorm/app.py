@@ -19,6 +19,7 @@ from .mapgen import BIOMES, BIOME_LABELS
 from .weapons import WEAPONS
 from . import sandbox as sandbox_mod
 from . import net as net_mod
+from .music import MusicPlayer, BIOME_MOOD
 
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".grubstorm.json")
 
@@ -27,6 +28,7 @@ DEFAULT_SETTINGS = {
     "reduce_flash": False, "colorblind": False, "aberration": True,
     "fullscreen": False, "server": "127.0.0.1:31999", "player_name": "Grub",
     "fps_cap": 144, "show_fps": False, "render_scale": 3, "curvature": False,
+    "music": 0.6,
 }
 
 FPS_CAPS = [60, 120, 144, 240, 0]          # 0 = uncapped
@@ -567,9 +569,12 @@ class OptionsScreen(Screen):
                                f"Screen shake: {int(s['shake'] * 100)}%",
                                s["shake"], 0, 2)
         y += 26
-        s["volume"] = ui.slider(view, (x, y, w, 18),
-                                f"Volume: {int(s['volume'] * 100)}%",
+        s["volume"] = ui.slider(view, (x, y, w // 2 - 4, 18),
+                                f"SFX: {int(s['volume'] * 100)}%",
                                 s["volume"])
+        s["music"] = ui.slider(view, (x + w // 2 + 4, y, w // 2 - 4, 18),
+                               f"Music: {int(s['music'] * 100)}%",
+                               s["music"])
         y += 26
         s["reduce_flash"] = ui.toggle(view, (x, y, w, 14),
                                       "Reduce flashing", s["reduce_flash"])
@@ -858,6 +863,7 @@ class App:
         self.crt = None
         self.apply_window()
         self.audio = Audio(self.settings)
+        self.music = MusicPlayer(self.settings)
         self.ui = UI(self.audio)
         self.renderer = Renderer(self.settings)
         self.demo = MenuDemo()
@@ -906,6 +912,15 @@ class App:
                     self.running = False
             self.ui.begin(events)
             self.screen.update(events)
+            # mood-aware soundtrack: menus get the theme, arenas their tone
+            if isinstance(self.screen, GameScreen):
+                biome = self.screen.settings.get("biome", "island")
+                self.music.want(BIOME_MOOD.get(biome, "warm"))
+            elif isinstance(self.screen, sandbox_mod.SandboxScreen):
+                self.music.want("deep")
+            else:
+                self.music.want("menu")
+            self.music.update()
             view = self.renderer.view
             self.screen.draw(view)
             if self.settings.get("show_fps"):
