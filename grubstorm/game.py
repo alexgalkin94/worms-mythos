@@ -623,6 +623,7 @@ class Game:
             return                # blocked teleport etc: nothing is spent
         self._homing_target = None
         team.shots += 1
+        g.recoil = 10
         self.fx_event("fire_" + spec.key, g.x, g.y, 1)
         # switching the jetpack OFF refunds nothing because it costs nothing
         if spec.key == "jetpack" and not g.jetpack:

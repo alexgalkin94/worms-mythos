@@ -44,6 +44,7 @@ class Grub:
         self.jump_buf = 0            # buffered jump press before landing
         self.dmg_acc = 0.0           # accumulating hit for the damage popup
         self.dmg_timer = 0
+        self.recoil = 0              # render: kick-back after firing
 
     # ----------------------------------------------------------- collision
     def _solid_at(self, world, x, y):
@@ -140,6 +141,8 @@ class Grub:
             self.burn_t -= 1
         if self.shock_t > 0:
             self.shock_t -= 1
+        if self.recoil > 0:
+            self.recoil -= 1
 
         if self.roping:
             self._update_rope(game, inp, active, grav)

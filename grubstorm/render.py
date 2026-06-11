@@ -64,6 +64,10 @@ class Renderer:
         self.gas_surf.set_colorkey(_KEY)
         self.gas_surf.set_alpha(150)
         self.gas_surf.fill(_KEY)
+        self.liq_surf = pygame.Surface((GRID_W, GRID_H))
+        self.liq_surf.set_colorkey(_KEY)
+        self.liq_surf.set_alpha(205)
+        self.liq_surf.fill(_KEY)
         self.em_surf = pygame.Surface((GRID_W, GRID_H))
         self._glow = pygame.Surface((GRID_W, GRID_H))
         self._dark = None
@@ -179,12 +183,16 @@ class Renderer:
         phT = M.PHASE[matT]
         self._edge_shade(world, rgbT, y0, y1, x0, x1)
         gasT = phT == M.P_GAS
+        liqT = phT == M.P_LIQUID
         gas_rgb = rgbT.copy()
         gas_rgb[~gasT] = _KEY
-        rgbT[phT <= M.P_GAS] = _KEY                      # key out empty + gas
+        liq_rgb = rgbT.copy()
+        liq_rgb[~liqT] = _KEY
+        rgbT[phT <= M.P_LIQUID] = _KEY        # key out empty + gas + liquid
         rect = (x0, y0, x1 - x0, y1 - y0)
         pygame.surfarray.blit_array(self.cell_surf.subsurface(rect), rgbT)
         pygame.surfarray.blit_array(self.gas_surf.subsurface(rect), gas_rgb)
+        pygame.surfarray.blit_array(self.liq_surf.subsurface(rect), liq_rgb)
         pygame.surfarray.blit_array(self.em_surf.subsurface(rect),
                                     EMIT_FLAT[matT])
         return True
@@ -286,7 +294,8 @@ class Renderer:
             (x - f * 0.6, y + 0.9 - wig * 0.4, 1.9),
             (x + f * 0.3, y - 0.5 + wig * 0.3, 1.9),
         ]
-        hx = x + f * 0.9
+        kick = -f * min(1.2, g.recoil * 0.12) if g.recoil else 0
+        hx = x + f * 0.9 + kick
         hy = y - 2.4 + tilt
         for px, py, r in segs:                            # dark rim first
             pygame.draw.circle(v, outline, (px, py), r + 0.8)
@@ -302,12 +311,22 @@ class Renderer:
         kx = hx - f * 2.8
         pygame.draw.line(v, col, (kx, hy - 0.4), (kx - f, hy + 1.2), 1)
         # two big googly worm eyes above the band, pupils follow the aim
+        hurt_face = g.dmg_timer > 20
+        blinking = (self._t + int(g.x * 13)) % 260 < 8
         pdy = 2 if g.aim > 0.35 else 0 if g.aim < -0.35 else 1
         pdx = 1 if f > 0 else 0
         for k in (-1, 1):
             ex = hx + f * 0.6 + k * 1.5 - 1
-            pygame.draw.rect(v, (250, 250, 252), (ex, hy - 3.8, 2, 3))
-            v.set_at((int(ex + pdx), int(hy - 3.8 + pdy)), (16, 12, 22))
+            if hurt_face:                      # >< ouch
+                pygame.draw.line(v, (250, 250, 252), (ex, hy - 3.8),
+                                 (ex + 1, hy - 1.8))
+                pygame.draw.line(v, (250, 250, 252), (ex + 1, hy - 3.8),
+                                 (ex, hy - 1.8))
+            elif blinking:
+                pygame.draw.rect(v, (250, 250, 252), (ex, hy - 2.4, 2, 1))
+            else:
+                pygame.draw.rect(v, (250, 250, 252), (ex, hy - 3.8, 2, 3))
+                v.set_at((int(ex + pdx), int(hy - 3.8 + pdy)), (16, 12, 22))
         if g.chute and not g.on_ground:
             pygame.draw.arc(v, col, (x - 7, y - 14, 14, 12), 0, math.pi, 2)
             pygame.draw.line(v, (200, 200, 200), (x - 6, y - 8), (x, y - 2))
@@ -326,10 +345,19 @@ class Renderer:
             pygame.draw.rect(v, hpc, (x - 5, y - 10, hpw, 1))
             pygame.draw.rect(v, col, (x - 6, y - 11, 12, 3), 1)
         if active:
-            # name tag + aim
+            # name tag + aim + the weapon in hand
             name = self.font_out.render(g.name, True, (255, 255, 255))
             v.blit(name, (x - name.get_width() // 2, y - 20))
             ang = g.aim if g.facing == 1 else math.pi - g.aim
+            from .icons import weapon_icon
+            from .weapons import WEAPONS
+            ic = weapon_icon(WEAPONS[game.weapon].key)
+            if f < 0:
+                ic = pygame.transform.flip(ic, True, False)
+            wx2 = x + math.cos(ang) * 6 + kick
+            wy2 = y + math.sin(ang) * 6 - 2
+            pygame.draw.line(v, (44, 22, 30), (hx, hy + 1), (wx2, wy2 + 4))
+            v.blit(ic, (wx2 - 6, wy2))
             cx = x + math.cos(ang) * 14
             cy = y + math.sin(ang) * 14
             pygame.draw.circle(v, (255, 80, 80), (int(cx), int(cy)), 2, 1)
@@ -553,16 +581,17 @@ class Renderer:
         v.blit(self._sky(spec), (0, 0))
         self._draw_decor(spec)
         v.blit(self.cell_surf, (0, 0))
-        v.blit(self.gas_surf, (0, 0))
         self._draw_headstones(game)
-        self._draw_entities(game)
-        for p in game.projectiles:
-            self._draw_projectile(p)
-        self._draw_particles(game)
         for g in game.all_grubs():
             if g.alive:
                 self._draw_grub(game, g, g is game.active_grub and
                                 game.phase in (Game.PH_ACTIVE, Game.PH_RETREAT))
+        for p in game.projectiles:
+            self._draw_projectile(p)
+        self._draw_particles(game)
+        v.blit(self.liq_surf, (0, 0))         # translucent water over bodies
+        v.blit(self.gas_surf, (0, 0))
+        self._draw_entities(game)             # tracers/HUD-ish stay on top
         self._apply_light()
         if hud:
             self.apply_camera()
