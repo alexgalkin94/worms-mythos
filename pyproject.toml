@@ -16,7 +16,12 @@ classifiers = [
 dependencies = [
     "pygame-ce>=2.4",
     "numpy>=1.24",
+    "tinysoundfont>=0.3",
 ]
+
+# tinysoundfont declares pyaudio (live-audio IO) as a hard dependency, but we
+# only use its offline renderer. pyaudio has no Linux wheels and would break
+# installation, so it is overridden away.
 
 [project.urls]
 Repository = "https://github.com/alexgalkin94/worms-mythos"
@@ -28,6 +33,9 @@ grubstorm-server = "grubstorm.relay:main"
 [build-system]
 requires = ["uv_build>=0.8.0,<0.9.0"]
 build-backend = "uv_build"
+
+[tool.uv]
+override-dependencies = ["pyaudio; python_version < '3'"]
 
 [tool.uv.build-backend]
 module-name = "grubstorm"

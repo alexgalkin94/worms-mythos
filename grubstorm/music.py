@@ -313,6 +313,199 @@ def compose(seed, mood="menu", bars=16):
     return mix.astype(np.float32)
 
 
+
+
+# ----------------------------------------------- soundfont renderer ----
+# Real sampled instruments via tinysoundfont + GeneralUser GS. The numpy
+# synth above stays as a fallback when the lib or the .sf2 is missing.
+try:
+    import tinysoundfont as _tsf
+    _HAVE_SF = True
+except Exception:                                   # pragma: no cover
+    _HAVE_SF = False
+import os as _os
+
+def _sf2_path():
+    p = _os.environ.get("GRUBSTORM_SF2")
+    if p and _os.path.exists(p):
+        return p
+    here = _os.path.join(_os.path.dirname(__file__), "assets",
+                         "GeneralUser-GS.sf2")
+    return here if _os.path.exists(here) else None
+
+
+# GM programs per mood: (chords, pad, arp, lead, bass, accent)
+_SF_MOODS = {
+    #        bpm root  chord pad  arp lead bass acc  wet   swing perc
+    "menu": ( 86, 57,  (4,   48,  46, 73,  32,  9),  0.30, 0.14, 0.5),
+    "warm": ( 82, 57,  (4,   48,  46, 73,  32,  11), 0.28, 0.14, 0.45),
+    "cold": ( 70, 60,  (8,   49,  10, 75,  32,  9),  0.40, 0.05, 0.2),
+    "dark": ( 74, 52,  (52,  50,  0,  60,  43,  47), 0.34, 0.0,  0.6),
+    "deep": ( 76, 55,  (89,  95,  11, 75,  32,  12), 0.42, 0.10, 0.4),
+}
+
+
+class _SFTrack:
+    """Event list -> rendered stereo loop through the SoundFont."""
+
+    def __init__(self, sf2, bars_secs):
+        self.synth = _tsf.Synth(samplerate=SR)
+        self.sfid = self.synth.sfload(sf2)
+        self.events = []                      # (t, kind, ch, note, vel)
+        self.length = bars_secs
+
+    def program(self, ch, prog):
+        self.synth.program_select(ch, self.sfid, 0, prog)
+
+    def note(self, t, ch, midinote, vel, dur):
+        t = t % self.length
+        self.events.append((t, "on", ch, midinote, int(max(1, min(127, vel)))))
+        self.events.append((t + dur, "off", ch, midinote, 0))
+
+    def render(self):
+        tail = 3.0
+        total = int((self.length + tail) * SR)
+        out = np.zeros((total, 2), np.float32)
+        self.events.sort(key=lambda e: e[0])
+        pos = 0
+        for t, kind, ch, note, vel in self.events:
+            target = min(total, int(t * SR))
+            if target > pos:
+                buf = self.synth.generate(target - pos)
+                out[pos:target] = np.frombuffer(buf, np.float32).reshape(-1, 2)
+                pos = target
+            if kind == "on":
+                self.synth.noteon(ch, note, vel)
+            else:
+                self.synth.noteoff(ch, note)
+        if pos < total:
+            buf = self.synth.generate(total - pos)
+            out[pos:] = np.frombuffer(buf, np.float32).reshape(-1, 2)
+        n = int(self.length * SR)
+        out[:total - n] += out[n:]            # wrap the tail: seamless loop
+        return out[:n]
+
+
+def compose_sf(seed, mood="menu", bars=16):
+    """The same musical brain as compose(), voiced by real instruments."""
+    sf2 = _sf2_path()
+    if not (_HAVE_SF and sf2):
+        raise RuntimeError("soundfont unavailable")
+    rnd = random.Random(seed)
+    bpm, root, progs, wet, swing, perc_amt = _SF_MOODS.get(mood,
+                                                           _SF_MOODS["menu"])
+    bpm += rnd.randint(-4, 4)
+    spb = 60.0 / bpm
+    bar = 4 * spb
+    trk = _SFTrack(sf2, bars * bar)
+    p_chord, p_pad, p_arp, p_lead, p_bass, p_acc = progs
+    for ch, prog in ((0, p_chord), (1, p_pad), (2, p_arp), (3, p_lead),
+                     (4, p_bass), (5, p_acc)):
+        trk.program(ch, prog)
+
+    progs_pool = _PROGS_DARK if mood == "dark" else _PROGS_WARM
+    prog = rnd.choice(progs_pool)
+    prog_b = rnd.choice([p for p in progs_pool if p is not prog])
+    chords = prog + prog_b
+
+    def j(s=0.012):
+        return rnd.gauss(0, s)
+
+    # chords: gentle keys, slightly rolled like a human hand
+    for ci, (deg, qual) in enumerate(chords):
+        t0 = ci * 2 * bar
+        for k, semi in enumerate(_CHORD[qual]):
+            trk.note(t0 + k * rnd.uniform(0.02, 0.05) + j(),
+                     0, root + deg + semi, rnd.uniform(46, 60),
+                     2 * bar * 0.95)
+        # sustained pad underneath, quieter
+        for semi in _CHORD[qual][:3]:
+            trk.note(t0 + j(0.03), 1, root + deg + semi - 12,
+                     rnd.uniform(30, 38), 2 * bar * 1.02)
+
+    # bass
+    for ci, (deg, qual) in enumerate(chords):
+        t0 = ci * 2 * bar
+        for b in range(2):
+            for beat, p in ((0, 0.95), (2.5, 0.5), (3.5, 0.25)):
+                if rnd.random() > p:
+                    continue
+                semi = deg if beat == 0 else deg + rnd.choice([0, 7, 12])
+                trk.note(t0 + (b * 4 + beat) * spb + j(0.006), 4,
+                         root + semi - 24, rnd.uniform(52, 68),
+                         spb * (1.7 if beat == 0 else 0.8))
+
+    # arpeggio with swing
+    if p_arp is not None and mood != "dark":
+        for ci, (deg, qual) in enumerate(chords):
+            t0 = ci * 2 * bar
+            tones = _CHORD[qual]
+            order = [0, 1, 2, 3, 2, 1, 3, 0]
+            for step in range(16):
+                if rnd.random() < 0.25:
+                    continue
+                t = t0 + step * spb * 0.5
+                if step % 2 == 1:
+                    t += swing * spb          # swing the off-eighths
+                semi = deg + tones[order[step % 8]] + \
+                    rnd.choice([0, 0, 12])
+                trk.note(t + j(0.008), 2, root + semi,
+                         rnd.uniform(34, 58), spb * rnd.uniform(0.8, 1.4))
+    elif mood == "dark":
+        # slow tolling octaves instead of an arp
+        for ci, (deg, qual) in enumerate(chords):
+            t0 = ci * 2 * bar
+            for b in (0, 1):
+                if rnd.random() < 0.7:
+                    trk.note(t0 + b * bar + j(0.01), 2, root + deg - 12,
+                             rnd.uniform(40, 52), bar * 0.9)
+
+    # lead: call and response
+    for sect in (0, 1):
+        base_t = (sect * 8 + 4) * bar
+        cur = rnd.choice([7, 10, 12])
+        t = base_t + rnd.uniform(0, spb)
+        for _ in range(rnd.randint(4, 6)):
+            semi = _PENTA_MINOR[cur % 5] + 12 * (cur // 5)
+            dur = spb * rnd.choice([1.5, 2, 2, 3])
+            trk.note(t + j(), 3, root + 12 + semi,
+                     rnd.uniform(48, 64), dur * 0.92)
+            t += dur * rnd.uniform(0.95, 1.3)
+            cur = max(0, min(14, cur + rnd.choice([-3, -2, 2, 3, 5, -5])))
+
+    # accents on section seams
+    for ci in range(0, len(chords), 2):
+        if rnd.random() < 0.7:
+            deg, qual = chords[ci]
+            trk.note(ci * 2 * bar + rnd.uniform(0, bar), 5,
+                     root + 24 + deg + rnd.choice(_CHORD[qual][:3]),
+                     rnd.uniform(36, 50), 2.5)
+
+    # soft GM drums (channel 9): heartbeat kick, whispering hats
+    if perc_amt > 0:
+        for b in range(bars):
+            for beat, note, p, v in ((0, 36, 0.9, 48), (2, 36, 0.7, 38),
+                                     (1.5, 37, 0.12, 30)):
+                if rnd.random() < p:
+                    trk.note(b * 4 * spb + beat * spb + j(0.005), 9,
+                             note, v * perc_amt * rnd.uniform(0.8, 1.1), 0.3)
+            for half in range(8):
+                if rnd.random() < 0.35:
+                    t = (b * 4 + half * 0.5) * spb
+                    if half % 2 == 1:
+                        t += swing * spb
+                    trk.note(t, 9, 42, rnd.uniform(16, 30) * perc_amt, 0.15)
+
+    mix = trk.render()
+    L = _reverb_loop(mix[:, 0].astype(np.float64), rnd, wet=wet)
+    R = _reverb_loop(mix[:, 1].astype(np.float64), rnd, wet=wet)
+    out = np.stack([L, R], axis=1)
+    out = np.tanh(out * 1.4) * 0.92
+    peak = np.abs(out).max() or 1.0
+    out *= 0.9 / peak
+    return out.astype(np.float32)
+
+
 # ------------------------------------------------------------- player ----
 BIOME_MOOD = {
     "island": "warm", "desert": "warm", "candy": "warm", "moon": "cold",
@@ -347,7 +540,10 @@ class MusicPlayer:
     def _render(self, mood):
         try:
             seed = random.randrange(1 << 30)
-            mix = compose(seed, mood)
+            try:
+                mix = compose_sf(seed, mood)
+            except Exception:
+                mix = compose(seed, mood)
             pcm = (mix * 32000).astype(np.int16)
             snd = pygame.sndarray.make_sound(np.ascontiguousarray(pcm))
         except Exception:

@@ -158,13 +158,16 @@ reduced-flashing mode and colorblind-friendly team palettes.
 
 The soundtrack is composed at runtime — every launch writes new pieces from
 real harmony (curated chord progressions, pentatonic call-and-response
-melodies) and renders them through hand-built synths tuned to sound organic:
-five-voice detuned analog pads with slow drift and tremolo, Karplus-Strong
-physical string plucks, a breathy lead with delayed vibrato, inharmonic FM
-bells, a heartbeat kick — all humanized (timing/velocity jitter, rests) and
-glued by a seamless loop reverb (circular FFT convolution, so the final
-bar's tail blooms into the first). Menus get the main theme; each arena gets
-a mood (warm / cold / dark / deep) that crossfades in. Music and SFX have
+melodies, swing, humanized timing and velocity, hand-rolled chords) and
+performs them on real sampled instruments: electric piano, strings, harp,
+flute, celesta, choir and soft GM drums via
+[tinysoundfont](https://pypi.org/project/tinysoundfont/) and the bundled
+[GeneralUser GS](https://github.com/mrbumpy409/GeneralUser-GS) SoundFont
+(license included). A seamless loop reverb (circular FFT convolution) makes
+the final bar's tail bloom into the first. Menus get the main theme; each
+arena gets a mood (warm / cold / dark / deep) that crossfades in. If the
+SoundFont stack is unavailable, a hand-built numpy synth fallback (detuned
+pads, Karplus-Strong strings, FM bells) takes over. Music and SFX have
 separate volume sliders.
 
 ## Repository layout
