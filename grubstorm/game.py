@@ -12,7 +12,7 @@ from .constants import (GRUB_HP, TURN_SECONDS, RETREAT_SECONDS,
                         GRUB_NAMES, SLUDGE_POISON, GRUB_RADIUS)
 from .world import World
 from .mapgen import generate
-from .grub import Grub
+from .grub import Grub, GLOAT_QUIPS, OOPS_QUIPS
 from .particles import Particles, KIND_MAT, KIND_SPARK, KIND_FX
 from .weapons import WEAPONS, W_BY_KEY, Projectile, default_ammo
 from .bodies import RigidBody
@@ -251,6 +251,7 @@ class Game:
     def apply_explosion(self, x, y, r, power, fire=False, silentish=False):
         self.world.explode(x, y, r, power, make_fire=fire, silent=silentish)
         attacker = self.current_team() if self.teams else None
+        scored_kill = hit_friend = False
         for g in self.all_grubs():
             if not g.alive:
                 continue
@@ -266,6 +267,10 @@ class Game:
                     attacker.max_hit = max(attacker.max_hit, dmg)
                     if pre and not g.alive:
                         attacker.kills += 1
+                        scored_kill = True
+                elif attacker is not None and dmg >= 10 \
+                        and g is not self.active_grub:
+                    hit_friend = True
                 nd = max(d, 2.0)
                 g.knockback((g.x - x) / nd * f * power * 0.045,
                             (g.y - y) / nd * f * power * 0.045 - f * 0.5)
@@ -280,6 +285,12 @@ class Game:
                           dmg=power * f * 0.5)
         if not silentish:
             self.fx_event("boom", x, y, min(4.0, power / 25))
+        ag = self.active_grub
+        if attacker is not None and ag is not None and ag.alive:
+            if scored_kill:
+                ag.say(GLOAT_QUIPS, salt=self.tick)
+            elif hit_friend and ag.quip_t == 0:
+                ag.say(OOPS_QUIPS, salt=self.tick)
         self.focus = (x, y)
 
     def shock_check(self, x, y, radius, dmg):

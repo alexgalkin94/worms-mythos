@@ -10,6 +10,11 @@ from .constants import (GRAVITY, GRUB_RADIUS, GRUB_WALK_SPEED, GRUB_STEP_UP,
 # body sample offsets for material contact (relative to centre)
 _BODY = [(0, 0), (-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, 1)]
 
+# speech-bubble one-liners (cosmetic; picked without touching the sim RNG)
+OUCH_QUIPS = ["OUCH!", "OOF!", "MEDIC!", "THAT HURT!", "HEY!", "OW OW OW"]
+GLOAT_QUIPS = ["GOTCHA!", "HEH HEH.", "BYE BYE!", "SO LONG!", "TOO EASY."]
+OOPS_QUIPS = ["OOPS.", "UH OH.", "NOT IDEAL.", "MY BAD."]
+
 
 class Grub:
     def __init__(self, x, y, name, team_idx, hp):
@@ -45,6 +50,8 @@ class Grub:
         self.dmg_acc = 0.0           # accumulating hit for the damage popup
         self.dmg_timer = 0
         self.recoil = 0              # render: kick-back after firing
+        self.quip = ""               # speech bubble text (render only)
+        self.quip_t = 0
 
     # ----------------------------------------------------------- collision
     def _solid_at(self, world, x, y):
@@ -110,6 +117,8 @@ class Grub:
         if self.hp <= 0:
             self.hp = 0
             self.die(game)
+        elif dmg >= 18 and self.quip_t < 30:
+            self.say(OUCH_QUIPS, salt=int(dmg))
 
     def die(self, game=None):
         if not self.alive:
@@ -117,6 +126,13 @@ class Grub:
         self.alive = False
         if game is not None:
             game.on_grub_death(self)
+
+    def say(self, lines, salt=0, ttl=110):
+        """Cosmetic speech bubble. The pick is a pure function of sim state
+        so every lockstep client shows the same line for free."""
+        self.quip = lines[(int(self.x * 7) + int(self.y * 3) + salt)
+                          % len(lines)]
+        self.quip_t = ttl
 
     def knockback(self, ix, iy):
         self.vx += ix
@@ -143,6 +159,8 @@ class Grub:
             self.shock_t -= 1
         if self.recoil > 0:
             self.recoil -= 1
+        if self.quip_t > 0:
+            self.quip_t -= 1
 
         if self.roping:
             self._update_rope(game, inp, active, grav)

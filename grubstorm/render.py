@@ -73,6 +73,7 @@ class Renderer:
         self._light_built = False
         self._world_ref = None
         self.font = PixelFont(1)
+        self.font_plain = PixelFont(1, shadow=False)
         self.font_out = PixelFont(1, outline=True)
         self.font_big = PixelFont(2)
         self.font_huge = PixelFont(3)
@@ -343,6 +344,18 @@ class Renderer:
             pygame.draw.rect(v, (20, 20, 30), (x - 6, y - 11, 12, 3))
             pygame.draw.rect(v, hpc, (x - 5, y - 10, hpw, 1))
             pygame.draw.rect(v, col, (x - 6, y - 11, 12, 3), 1)
+        # speech bubble
+        if g.alive and g.quip_t > 0 and g.quip:
+            s = self.font_plain.render(g.quip, True, (20, 16, 12))
+            bw, bh = s.get_width() + 4, s.get_height() + 3
+            bx = min(max(2, x - bw // 2), GRID_W - bw - 2)
+            by = max(2, y - 22 - bh)
+            pygame.draw.rect(v, (224, 210, 178), (bx, by, bw, bh))
+            pygame.draw.rect(v, (94, 80, 56), (bx, by, bw, bh), 1)
+            pygame.draw.polygon(v, (224, 210, 178),
+                                [(x - 2, by + bh), (x + 2, by + bh),
+                                 (x, by + bh + 2)])
+            v.blit(s, (bx + 2, by + 2))
         if active:
             # name tag + aim + the weapon in hand
             name = self.font_out.render(g.name, True, (255, 255, 255))
