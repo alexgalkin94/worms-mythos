@@ -24,11 +24,15 @@ class Camera:
         self.shake = 0.0
         self.ox = self.oy = 0.0
         self.flash = 0.0
+        self.cx, self.cy = GRID_W / 2, GRID_H / 2
+        self.zoom = 1.5
+        self.follow = True
 
     def kick(self, mag):
         self.shake = min(8.0, self.shake + mag * 2.2)
+        self.follow = True               # action recaptures the camera
 
-    def update(self):
+    def update(self, focus=None):
         self.shake *= 0.88
         self.flash *= 0.85
         if self.shake > 0.2:
@@ -36,6 +40,17 @@ class Camera:
             self.oy = random.uniform(-self.shake, self.shake)
         else:
             self.ox = self.oy = 0.0
+        if self.follow and focus is not None:
+            self.cx += (focus[0] - self.cx) * 0.07
+            self.cy += (focus[1] - self.cy) * 0.07
+
+    def rect(self):
+        """Visible world rect at the current zoom, clamped to the map."""
+        w = GRID_W / self.zoom
+        h = GRID_H / self.zoom
+        x = min(max(self.cx - w / 2 + self.ox, 0), GRID_W - w)
+        y = min(max(self.cy - h / 2 + self.oy, 0), GRID_H - h)
+        return pygame.Rect(int(x), int(y), int(w), int(h))
 
 
 class Renderer:
@@ -64,6 +79,7 @@ class Renderer:
         self._t = 0
         self._gas_rect = None
         self._gas_layer = None
+        self._zoom_tmp = None
 
     # ----------------------------------------------------------------- sky
     def _sky(self, spec):
@@ -491,9 +507,20 @@ class Renderer:
             v.blit(sd, (GRID_W // 2 - sd.get_width() // 2, 22))
 
     # ---------------------------------------------------------------- main
+    def apply_camera(self):
+        """Crop the camera rect out of the world view and blow it up."""
+        if self.camera.zoom <= 1.001:
+            return
+        rect = self.camera.rect()
+        if self._zoom_tmp is None:
+            self._zoom_tmp = pygame.Surface((GRID_W, GRID_H))
+        sub = self.view.subsurface(rect)
+        pygame.transform.scale(sub, (GRID_W, GRID_H), self._zoom_tmp)
+        self.view.blit(self._zoom_tmp, (0, 0))
+
     def render_game(self, game: Game, hud=True):
         self._t += 1
-        self.camera.update()
+        self.camera.update(game.focus)
         spec = game.spec
         v = self.view
         changed = self.refresh_cells(game.world)
@@ -514,6 +541,8 @@ class Renderer:
                 self._draw_grub(game, g, g is game.active_grub and
                                 game.phase in (Game.PH_ACTIVE, Game.PH_RETREAT))
         self._apply_light()
+        if hud:
+            self.apply_camera()
         if self.camera.flash > 0.03 and not self.settings.get("reduce_flash"):
             f = pygame.Surface((GRID_W, GRID_H))
             f.fill((255, 240, 220))

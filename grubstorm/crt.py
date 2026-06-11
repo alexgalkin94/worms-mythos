@@ -16,6 +16,7 @@ in the best possible way:
 Everything scales with the CRT/bloom sliders; CRT at 0 = clean pixels.
 """
 import random
+import time
 
 import numpy as np
 import pygame
@@ -35,8 +36,11 @@ class CRT:
         self._phosphor = None
         self._shine = None
         self._built_for = None
+        self._slider_val = None
+        self._slider_t = 0.0
         self._warp_x = self._warp_y = None
         self._hal = pygame.Surface((self.vw, self.vh))
+        self._smear_tmp = pygame.Surface((self.vw, self.vh))
         self._build_overlays()
         self._build_warp()
 
@@ -45,6 +49,7 @@ class CRT:
         w, h, sc = self.vw, self.vh, self.scale
         crt = float(self.settings.get("crt", 0.8))
         self._built_for = crt
+        self._slider_t = 0.0
         # linear-light multipliers for slot mask + scanlines + vignette
         m = np.ones((w, h), np.float32)
         xs = np.arange(w)
@@ -109,26 +114,43 @@ class CRT:
         self._warp_y = np.clip(wy.round(), 0, GRID_H - 1).astype(np.int32).T
 
     # -------------------------------------------------------------- present
+    @staticmethod
+    def _ramp(v, a, b):
+        return min(1.0, max(0.0, (v - a) / (b - a)))
+
     def present(self, view, screen):
         s = self.settings
         crt = float(s.get("crt", 0.8))
-        if abs(crt - self._built_for) > 0.02:
+        # debounced overlay rebuild: dragging the slider doesn't hitch —
+        # the expensive mask rebuild waits until the value settles
+        now = time.monotonic()
+        if crt != self._slider_val:
+            self._slider_val = crt
+            self._slider_t = now
+        if self._built_for is None or (abs(crt - self._built_for) > 0.02
+                                        and now - self._slider_t > 0.25):
             self._build_overlays()
         bloom_amt = float(s.get("bloom", 0.7))
 
-        # phosphor persistence: faint exponential trails on bright movement
-        if crt > 0.45 and not s.get("reduce_flash"):
-            self._persist.fill((168, 172, 178),
+        # phosphor persistence fades in smoothly with the slider
+        pers = self._ramp(crt, 0.30, 0.75)
+        if pers > 0.02 and not s.get("reduce_flash"):
+            d = int(255 - 87 * pers)
+            self._persist.fill((d, d + 4, d + 10),
                                special_flags=pygame.BLEND_RGB_MULT)
             view.blit(self._persist, (0, 0),
                       special_flags=pygame.BLEND_RGB_MAX)
             self._persist.blit(view, (0, 0))
 
-        # deconvergence: red and blue beams land a hair apart
-        if crt > 0.25 and s.get("aberration", True):
+        # deconvergence: blended shift, no hard on/off pop
+        ab = self._ramp(crt, 0.12, 0.38) if s.get("aberration", True) else 0.0
+        if ab > 0.03:
+            a8 = int(ab * 256)
             arr = pygame.surfarray.pixels3d(view)
-            arr[1:, :, 0] = arr[:-1, :, 0]
-            arr[:-1, :, 2] = arr[1:, :, 2]
+            r = arr[:, :, 0].astype(np.uint16)
+            b = arr[:, :, 2].astype(np.uint16)
+            arr[1:, :, 0] = ((r[1:] * (256 - a8) + r[:-1] * a8) >> 8).astype(np.uint8)
+            arr[:-1, :, 2] = ((b[:-1] * (256 - a8) + b[1:] * a8) >> 8).astype(np.uint8)
             del arr
 
         # bright-pass for bloom + halation, at low res
@@ -153,29 +175,40 @@ class CRT:
             arr[:] = arr[self._warp_x, self._warp_y]
             del arr
 
-        # THE pixel-melt: the beam spot blends neighbouring pixels
-        # horizontally; scanline structure keeps the vertical definition
+        # THE pixel-melt, fading in smoothly: crisp pixels at low CRT,
+        # fully melted beam at high — crossfaded in between
         big = self.big
-        if crt > 0.2:
+        smear = self._ramp(crt, 0.10, 0.34)
+        if smear >= 0.999:
             pygame.transform.smoothscale(view, (self.vw, GRID_H), self._wide)
             pygame.transform.scale(self._wide, (self.vw, self.vh), big)
+        elif smear <= 0.001:
+            pygame.transform.scale(view, (self.vw, self.vh), big)
         else:
             pygame.transform.scale(view, (self.vw, self.vh), big)
+            pygame.transform.smoothscale(view, (self.vw, GRID_H), self._wide)
+            pygame.transform.scale(self._wide, (self.vw, self.vh),
+                                   self._smear_tmp)
+            self._smear_tmp.set_alpha(int(255 * smear))
+            big.blit(self._smear_tmp, (0, 0))
 
-        if crt > 0.05:
+        if crt > 0.02:
             big.blit(self._phosphor, (0, 0),
                      special_flags=pygame.BLEND_RGB_MULT)
             # halation: glass-scattered light fills the scanline gaps around
             # bright areas (reads as the beam widening on hot pixels)
-            if blo is not None and crt > 0.3:
+            hal = self._ramp(crt, 0.16, 0.42)
+            if blo is not None and hal > 0.03:
                 pygame.transform.scale(blo, (self.vw, self.vh), self._hal)
-                self._hal.set_alpha(int(60 + 70 * bloom_amt))
+                self._hal.set_alpha(int((60 + 70 * bloom_amt) * hal))
                 big.blit(self._hal, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
-            if crt > 0.5:
+            if crt > 0.3:                  # shine brightness already ~crt
                 big.blit(self._shine, (0, 0),
                          special_flags=pygame.BLEND_RGB_ADD)
-            if not s.get("reduce_flash") and crt > 0.4:
-                d = 248 + random.randint(0, 7)
+            flick = self._ramp(crt, 0.25, 0.70)
+            if not s.get("reduce_flash") and flick > 0.03:
+                depth = int(8 * flick)
+                d = 255 - depth + random.randint(0, depth)
                 big.fill((d, d, d), special_flags=pygame.BLEND_RGB_MULT)
         sw, sh = screen.get_size()
         if (sw, sh) != (self.vw, self.vh):

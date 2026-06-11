@@ -274,7 +274,16 @@ class GameScreen(Screen):
     def _mouse_world(self):
         mx, my = pygame.mouse.get_pos()
         win = pygame.display.get_surface().get_size()
-        return (mx * GRID_W / max(1, win[0]), my * GRID_H / max(1, win[1]))
+        sx = mx * GRID_W / max(1, win[0])
+        sy = my * GRID_H / max(1, win[1])
+        cam = self.app.renderer.camera
+        if cam.zoom <= 1.001:
+            return (sx, sy)
+        w = GRID_W / cam.zoom
+        h = GRID_H / cam.zoom
+        x0 = min(max(cam.cx - w / 2, 0), GRID_W - w)
+        y0 = min(max(cam.cy - h / 2, 0), GRID_H - h)
+        return (x0 + sx / cam.zoom, y0 + sy / cam.zoom)
 
     def _local_input(self):
         keys = pygame.key.get_pressed()
@@ -343,6 +352,12 @@ class GameScreen(Screen):
                 elif e.key in (pygame.K_w, pygame.K_s, pygame.K_UP,
                                pygame.K_DOWN):
                     self.mouse_aim = False      # keys take over the aim
+                elif e.key == pygame.K_q:
+                    self._cycle_weapon(-1)
+                elif e.key == pygame.K_e:
+                    self._cycle_weapon(1)
+                elif e.key in (pygame.K_HOME, pygame.K_n):
+                    app.renderer.camera.follow = True
                 elif e.key == pygame.K_TAB:
                     self.panel_open = not self.panel_open
             elif e.type == pygame.MOUSEMOTION:
@@ -350,12 +365,19 @@ class GameScreen(Screen):
                 if abs(e.pos[0] - lx) + abs(e.pos[1] - ly) > 3:
                     self.mouse_aim = True       # ...until the mouse moves
                     self._last_mouse = e.pos
+                if e.buttons[1]:                # middle-drag pans the camera
+                    cam = app.renderer.camera
+                    win = pygame.display.get_surface().get_size()
+                    cam.cx -= e.rel[0] * GRID_W / max(1, win[0]) / cam.zoom
+                    cam.cy -= e.rel[1] * GRID_H / max(1, win[1]) / cam.zoom
+                    cam.follow = False
             elif e.type == pygame.MOUSEWHEEL:
                 if self.panel_open:
                     self.panel_scroll = getattr(self, "panel_scroll", 0) - \
                         e.y * 20
-                elif not self.paused:
-                    self._cycle_weapon(e.y)     # quick weapon cycling
+                elif not self.paused:           # wheel zooms the battlefield
+                    cam = app.renderer.camera
+                    cam.zoom = max(1.0, min(2.5, cam.zoom * (1.12 ** e.y)))
             elif e.type == pygame.MOUSEBUTTONUP:
                 if e.button == 1:
                     self._fire_block = False
@@ -371,6 +393,19 @@ class GameScreen(Screen):
                         self.pending_click = (int(gx), int(gy))
         if self.paused:
             return
+        # classic Worms edge pan: cursor against the window border
+        cam = app.renderer.camera
+        if not self.panel_open and pygame.mouse.get_focused():
+            mx, my = pygame.mouse.get_pos()
+            win = pygame.display.get_surface().get_size()
+            pan = 2.6 / cam.zoom
+            if mx < 10: cam.cx -= pan; cam.follow = False
+            elif mx > win[0] - 10: cam.cx += pan; cam.follow = False
+            if my < 10: cam.cy -= pan; cam.follow = False
+            elif my > win[1] - 10: cam.cy += pan; cam.follow = False
+        if self.game.turn_no != getattr(self, "_seen_turn", -1):
+            self._seen_turn = self.game.turn_no
+            cam.follow = True                   # new turn recaptures camera
         for _ in range(app.sim_steps):
             self._tick_once()
             self._jump = self._backflip = False
@@ -641,7 +676,7 @@ HELP_TEXT = [
     ("MOVE", "A/D walk. SPACE jump (coyote + buffered). SHIFT backflip."),
     ("AIM", "Aim with the mouse. W/S or arrows fine-tune by keyboard."),
     ("FIGHT", "Hold LEFT MOUSE (or F) to charge, release to fire."),
-    ("", "Mouse wheel cycles weapons. TAB or right-click: full arsenal."),
+    ("", "Q/E cycle weapons. TAB or right-click: full arsenal."),
     ("", "Click-weapons (airstrike, teleport...) fire where you click."),
     ("WORLD", "Everything is simulated. Water flows, oil burns, acid eats"),
     ("", "terrain, gas explodes, lava melts, ice freezes, electricity"),
@@ -649,6 +684,8 @@ HELP_TEXT = [
     ("COMBOS", "Spill oil then spark it. Freeze water to build bridges."),
     ("", "Flood tunnels. Drop lava into bunkers. Open gas pockets near"),
     ("", "campers. Black holes eat everything. Be creative. Be cruel."),
+    ("CAMERA", "Wheel zooms. Cursor at the edge or middle-drag pans."),
+    ("", "HOME or N snaps back to the action."),
     ("WIN", "Last team standing wins. After sudden death the world floods."),
     ("CRATES", "Falling crates hold weapons or health. Or a trap. Gamble!"),
 ]
