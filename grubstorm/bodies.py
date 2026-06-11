@@ -34,7 +34,6 @@ class RigidBody:
         self.alive = True
         self.resting = False
         self.written = []                         # cells we own right now
-        self.check_t = 0
 
     # ------------------------------------------------------------ cells
     def _rect_cells(self):
@@ -102,9 +101,10 @@ class RigidBody:
             self._shatter(game)
             return False
         # verify our cells occasionally even while resting (explosions!)
+        # scheduled off game.tick so a restored snapshot checks on the
+        # same tick as every other lockstep client
         if self.resting:
-            self.check_t += 1
-            if self.check_t % 8 == 0:
+            if game.tick % 8 == 0:
                 missing = sum(1 for (cx, cy) in self.written
                               if not world.in_bounds(cx, cy)
                               or world.mat[cy, cx] != self.mat)

@@ -174,6 +174,7 @@ class Bot:
         # personality: aim error
         if "angle" in plan:
             plan["angle"] += (rng.random() * 2 - 1) * self.persona["err"]
+        if "power" in plan:
             plan["power"] = max(0.15, min(1.0,
                 plan["power"] + (rng.random() * 2 - 1) * self.persona["err"]))
         plan["t"] = 0

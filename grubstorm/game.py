@@ -724,6 +724,7 @@ class Game:
                     "roping": g.roping, "rope": [g.rope_ax, g.rope_ay,
                                                  g.rope_len],
                     "dmg_turn": g.damage_taken_turn,
+                    "coyote": g.coyote, "jump_buf": g.jump_buf,
                     "magic_cd": getattr(g, "magic_cd", -10 ** 9)})
             snap["teams"].append(td)
         return snap
@@ -774,6 +775,8 @@ class Game:
                                                 gd["roping"])
                 g.rope_ax, g.rope_ay, g.rope_len = gd["rope"]
                 g.damage_taken_turn = gd["dmg_turn"]
+                g.coyote = gd.get("coyote", 0)
+                g.jump_buf = gd.get("jump_buf", 0)
                 g.magic_cd = gd["magic_cd"]
         self.projectiles.clear(); self.entities.clear()
         self.floaters = []
