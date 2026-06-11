@@ -6,8 +6,6 @@ stream + seed reproduces the same match on every machine (lockstep net play).
 import math
 import random
 
-import numpy as np
-
 from . import materials as M
 from .constants import (GRUB_HP, TURN_SECONDS, RETREAT_SECONDS,
                         SETTLE_TIMEOUT, SUDDEN_DEATH_AFTER, CRATE_CHANCE,

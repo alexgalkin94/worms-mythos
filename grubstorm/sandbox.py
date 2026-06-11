@@ -14,7 +14,7 @@ from .grub import Grub
 from .bodies import RigidBody
 from .game import InputFrame
 from .weapons import WEAPONS, W_BY_KEY
-from .ui import ACCENT, ACCENT2, FG, DIM, BG2
+from .ui import ACCENT, ACCENT2, FG, DIM
 
 
 class LabRig:

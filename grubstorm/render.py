@@ -7,10 +7,9 @@ import numpy as np
 import pygame
 
 from . import materials as M
-from .constants import (GRID_W, GRID_H, TEAM_COLORS, TEAM_COLORS_CB,
-                        GRUB_RADIUS)
+from .constants import GRID_W, GRID_H, TEAM_COLORS, TEAM_COLORS_CB
 from .game import Game
-from .particles import KIND_MAT, KIND_SPARK, KIND_FX
+from .particles import KIND_SPARK
 from .pixelfont import PixelFont
 
 _KEY = (255, 0, 255)

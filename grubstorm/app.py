@@ -3,18 +3,17 @@ import json
 import math
 import os
 import random
-import sys
 
 import pygame
 
-from .constants import (GRID_W, GRID_H, VIEW_W, VIEW_H, TEAM_COLORS,
-                        TEAM_COLORS_CB, TEAM_NAME_POOL, TURN_SECONDS)
+from .constants import (GRID_W, GRID_H, TEAM_COLORS, TEAM_NAME_POOL,
+                        TURN_SECONDS)
 from .game import Game, InputFrame
-from .ai import Bot, PERSONA_LABELS
+from .ai import Bot
 from .render import Renderer
-from .crt import CRT, CRT_PRESETS, CRT_PARAMS, migrate_crt_settings
+from .crt import CRT, CRT_PRESETS, migrate_crt_settings
 from .audio import Audio
-from .ui import UI, ACCENT, ACCENT2, FG, DIM, BG, BG2
+from .ui import UI, ACCENT, ACCENT2, FG, DIM
 from .mapgen import BIOMES, BIOME_LABELS
 from .weapons import WEAPONS
 from .icons import weapon_icon

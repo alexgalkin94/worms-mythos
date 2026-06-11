@@ -1,10 +1,8 @@
 """Tiny immediate-mode UI toolkit, drawn at grid resolution so the whole
 interface lives inside the CRT glass like a proper arcade cabinet."""
-import math
-
 import pygame
 
-from .constants import GRID_W, GRID_H, CELL_SCALE
+from .constants import GRID_W, GRID_H
 from .pixelfont import PixelFont
 
 # Noita-toned interface: parchment text on near-black panels with thin
