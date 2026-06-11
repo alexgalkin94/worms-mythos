@@ -79,20 +79,25 @@ _SHADOW = (14, 10, 12)
 
 class PixelFont:
     """Drop-in replacement for the pygame font API we use:
-    render(text, antialias, color) -> Surface (antialias is ignored)."""
+    render(text, antialias, color) -> Surface (antialias is ignored).
+    outline=True draws a full 1px dark outline — readable on any
+    background (worm names, HUD labels over bright terrain)."""
 
-    def __init__(self, scale=1, shadow=True):
+    def __init__(self, scale=1, shadow=True, outline=False):
         self.scale = scale
-        self.shadow = shadow
+        self.shadow = shadow and not outline
+        self.outline = outline
         self._cache = {}
 
     def get_height(self):
-        return 5 * self.scale + (1 if self.shadow else 0)
+        return 5 * self.scale + (2 if self.outline else
+                                 1 if self.shadow else 0)
 
     def size(self, text):
         n = len(text)
-        return (max(0, n * 4 - 1) * self.scale + (1 if self.shadow else 0),
-                self.get_height())
+        pad = 2 if self.outline else (1 if self.shadow else 0)
+        return (max(0, n * 4 - 1) * self.scale + pad,
+                5 * self.scale + pad)
 
     def render(self, text, a, b=None):
         color = tuple(b if b is not None else a)
@@ -101,19 +106,27 @@ class PixelFont:
         surf = self._cache.get(key)
         if surf is not None:
             return surf
-        sc, sh = self.scale, (1 if self.shadow else 0)
-        w = max(1, (len(text) * 4 - 1) * sc + sh)
-        h = 5 * sc + sh
+        sc = self.scale
+        pad = 2 if self.outline else (1 if self.shadow else 0)
+        w = max(1, (len(text) * 4 - 1) * sc + pad)
+        h = 5 * sc + pad
         surf = pygame.Surface((w, h), pygame.SRCALPHA)
-        for layer, col, off in (((0, _SHADOW, sc), (1, color, 0))
-                                if self.shadow else ((1, color, 0),)):
+        if self.outline:
+            layers = [(_SHADOW, (ox, oy)) for ox in (0, 1, 2)
+                      for oy in (0, 1, 2) if (ox, oy) != (1, 1)]
+            layers.append((color, (1, 1)))
+        elif self.shadow:
+            layers = [(_SHADOW, (sc, sc)), (color, (0, 0))]
+        else:
+            layers = [(color, (0, 0))]
+        for col, (offx, offy) in layers:
             for ci, ch in enumerate(text):
                 rows = _G.get(ch, _G["?"])
-                cx = ci * 4 * sc + off
+                cx = ci * 4 * sc + offx
                 for ry, row in enumerate(rows):
                     for rx, bit in enumerate(row):
                         if bit == "1":
-                            surf.fill(col, (cx + rx * sc, ry * sc + off,
+                            surf.fill(col, (cx + rx * sc, ry * sc + offy,
                                             sc, sc))
         if len(self._cache) > 3000:
             self._cache.clear()

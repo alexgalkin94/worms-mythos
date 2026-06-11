@@ -12,7 +12,7 @@ from .pixelfont import PixelFont
 ACCENT = (214, 168, 84)        # worn gold
 ACCENT2 = (122, 168, 188)      # cold runic blue
 FG = (224, 210, 178)           # parchment
-DIM = (130, 118, 96)
+DIM = (158, 144, 118)
 BG = (12, 10, 9)
 BG2 = (26, 22, 18)
 EDGE = (94, 80, 56)

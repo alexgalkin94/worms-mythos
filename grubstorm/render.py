@@ -70,6 +70,7 @@ class Renderer:
         self._light_built = False
         self._world_ref = None
         self.font = PixelFont(1)
+        self.font_out = PixelFont(1, outline=True)
         self.font_big = PixelFont(2)
         self.font_huge = PixelFont(3)
         self.camera = Camera()
@@ -326,7 +327,7 @@ class Renderer:
             pygame.draw.rect(v, col, (x - 6, y - 11, 12, 3), 1)
         if active:
             # name tag + aim
-            name = self.font.render(g.name, True, (255, 255, 255))
+            name = self.font_out.render(g.name, True, (255, 255, 255))
             v.blit(name, (x - name.get_width() // 2, y - 20))
             ang = g.aim if g.facing == 1 else math.pi - g.aim
             cx = x + math.cos(ang) * 14
@@ -391,7 +392,7 @@ class Renderer:
                 pygame.draw.circle(v, (120, 104, 70), (int(g.x), int(g.y)),
                                    rng_r, 1)
         for (x, y, text, ttl) in game.toasts:
-            s = self.font.render(text, True, (255, 120, 100))
+            s = self.font_out.render(text, True, (255, 130, 110))
             s.set_alpha(min(255, ttl * 6))
             v.blit(s, (int(x) - s.get_width() // 2, int(y) - 4))
         for (x0, y0, x1, y1, ttl, col) in game.tracers:
@@ -476,19 +477,24 @@ class Renderer:
         from .weapons import WEAPONS
         spec = WEAPONS[game.weapon]
         ammo = game.current_team().ammo.get(game.weapon, 0)
-        wtxt = self.font.render(
+        from .icons import weapon_icon
+        ic = weapon_icon(spec.key)
+        wtxt = self.font_out.render(
             spec.name if ammo < 0 else f"{spec.name} [{ammo}]",
-            True, (224, 210, 178))
-        pygame.draw.rect(v, (16, 16, 26),
-                         (4, GRID_H - 16, wtxt.get_width() + 8, 12))
-        v.blit(wtxt, (8, GRID_H - 14))
+            True, (228, 215, 185))
+        pygame.draw.rect(v, (14, 12, 11),
+                         (4, GRID_H - 18, wtxt.get_width() + 24, 14))
+        pygame.draw.rect(v, (94, 80, 56),
+                         (4, GRID_H - 18, wtxt.get_width() + 24, 14), 1)
+        v.blit(ic, (7, GRID_H - 16))
+        v.blit(wtxt, (21, GRID_H - 15))
         # homing needs a target first — say so
         if spec.key == "homing" and \
                 getattr(game, "_homing_target", None) is None and \
                 game.phase == Game.PH_ACTIVE:
-            hint = self.font.render("click a target, then fire", True,
-                                    (160, 200, 220))
-            v.blit(hint, (8, GRID_H - 26))
+            hint = self.font_out.render("click a target, then fire", True,
+                                         (170, 210, 230))
+            v.blit(hint, (8, GRID_H - 30))
         if game.charging:
             p = game.charge
             pygame.draw.rect(v, (20, 20, 30), (4, GRID_H - 26, 84, 8))

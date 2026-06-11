@@ -151,8 +151,12 @@ modeled on how real tubes actually display pixel art — the pixels melt:
 - emissive materials (lava, fire, acid, crystals, magic) light up dark
   caves, and bright pixels bloom
 
-All of it on sliders/toggles in Options (CRT at 0 = clean pixels), with a
-reduced-flashing mode and colorblind-friendly team palettes.
+Every tube parameter is its own slider (beam smear, scanlines, slot mask,
+color fringe, halation, phosphor trail, flicker, vignette, curvature,
+bloom) with presets — Clean, Subtle, Arcade, Trinitron, Haunted — and the
+options screen is reachable from the pause menu, previewing your live
+match while you tune. Plus a reduced-flashing mode and colorblind-friendly
+team palettes.
 
 ## Music
 

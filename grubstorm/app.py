@@ -12,11 +12,12 @@ from .constants import (GRID_W, GRID_H, VIEW_W, VIEW_H, TEAM_COLORS,
 from .game import Game, InputFrame
 from .ai import Bot, PERSONA_LABELS
 from .render import Renderer
-from .crt import CRT
+from .crt import CRT, CRT_PRESETS, CRT_PARAMS, migrate_crt_settings
 from .audio import Audio
 from .ui import UI, ACCENT, ACCENT2, FG, DIM, BG, BG2
 from .mapgen import BIOMES, BIOME_LABELS
 from .weapons import WEAPONS
+from .icons import weapon_icon
 from . import sandbox as sandbox_mod
 from . import net as net_mod
 from .music import MusicPlayer, BIOME_MOOD
@@ -24,11 +25,11 @@ from .music import MusicPlayer, BIOME_MOOD
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".grubstorm.json")
 
 DEFAULT_SETTINGS = {
-    "crt": 0.8, "bloom": 0.7, "shake": 1.0, "volume": 0.8,
-    "reduce_flash": False, "colorblind": False, "aberration": True,
+    "shake": 1.0, "volume": 0.8, "music": 0.6,
+    "reduce_flash": False, "colorblind": False,
     "fullscreen": False, "server": "127.0.0.1:31999", "player_name": "Grub",
-    "fps_cap": 144, "show_fps": False, "render_scale": 3, "curvature": False,
-    "music": 0.6,
+    "fps_cap": 144, "show_fps": False, "render_scale": 3,
+    **CRT_PRESETS["ARCADE"],
 }
 
 FPS_CAPS = [60, 120, 144, 240, 0]          # 0 = uncapped
@@ -47,6 +48,7 @@ def load_settings():
             s.update(json.load(f))
     except Exception:
         pass
+    migrate_crt_settings(s)
     return s
 
 
@@ -466,10 +468,14 @@ class GameScreen(Screen):
                      "connection lost — ESC to leave", (255, 100, 90),
                      ui.font_m, center=True)
         if self.paused:
-            ui.panel(view, (GRID_W // 2 - 60, 70, 120, 110), "PAUSED")
-            y = 95
+            ui.panel(view, (GRID_W // 2 - 60, 60, 120, 132), "PAUSED")
+            y = 85
             if ui.button(view, (GRID_W // 2 - 45, y, 90, 15), "RESUME"):
                 self.paused = False
+            y += 20
+            if ui.button(view, (GRID_W // 2 - 45, y, 90, 15), "OPTIONS"):
+                app.goto(OptionsScreen(app, back_fn=lambda: app.goto(self),
+                                       bg_game=self.game))
             y += 20
             if self.session is None and \
                     ui.button(view, (GRID_W // 2 - 45, y, 90, 15), "SKIP TURN"):
@@ -505,7 +511,7 @@ class GameScreen(Screen):
                 if w.category == ckey and team.ammo.get(i, 0) != 0:
                     rows.append(("w", i))
             rows.append(("gap", None))
-        row_h = 10
+        row_h = 12
         content_h = len(rows) * row_h
         max_scroll = max(0, content_h - inner.h)
         self.panel_scroll = max(0, min(getattr(self, "panel_scroll", 0),
@@ -532,7 +538,8 @@ class GameScreen(Screen):
                     elif hov:
                         pygame.draw.rect(view, (36, 30, 24), r)
                     col = ACCENT if sel else (FG if hov else DIM)
-                    ui.label(view, r.x + 3, y + 2, w.name + ammo_s, col,
+                    view.blit(weapon_icon(w.key), (r.x + 1, y + 1))
+                    ui.label(view, r.x + 16, y + 3, w.name + ammo_s, col,
                              ui.font)
                     if hov and ui.clicked and mine:
                         self.pending_weapon = i
@@ -596,66 +603,98 @@ class ResultsScreen(Screen):
 
 
 class OptionsScreen(Screen):
+    """Full shader control: presets on top, every tube parameter on its
+    own slider, live preview of whatever runs behind it (the menu demo,
+    or — entered from pause — your actual match)."""
+
+    SLIDERS = [
+        ("crt_smear", "Beam smear"), ("crt_scanline", "Scanlines"),
+        ("crt_mask", "Slot mask"), ("crt_fringe", "Color fringe"),
+        ("crt_halation", "Halation"), ("crt_persist", "Phosphor trail"),
+        ("crt_flicker", "Flicker"), ("crt_vignette", "Vignette"),
+        ("crt_curve", "Curvature"), ("bloom", "Bloom"),
+    ]
+
+    def __init__(self, app, back_fn=None, bg_game=None):
+        super().__init__(app)
+        self.back_fn = back_fn or (lambda: app.goto(MainMenu(app)))
+        self.bg_game = bg_game
+
     def update(self, events):
-        self.app.step_demo()
+        if self.bg_game is None:
+            self.app.step_demo()
+
+    def _preset_name(self):
+        s = self.app.settings
+        for name, vals in CRT_PRESETS.items():
+            if all(abs(float(s.get(k, 0)) - v) < 0.03 for k, v in vals.items()):
+                return name
+        return None
 
     def draw(self, view):
         app, ui = self.app, self.app.ui
         s = app.settings
-        app.renderer.render_game(app.demo.game, hud=False)
-        ui.panel(view, (GRID_W // 2 - 110, 10, 220, GRID_H - 20), "OPTIONS")
-        x, w = GRID_W // 2 - 90, 180
-        y = 34
-        s["crt"] = ui.slider(view, (x, y, w, 18),
-                             f"CRT intensity: {int(s['crt'] * 100)}%",
-                             s["crt"])
-        y += 26
-        s["bloom"] = ui.slider(view, (x, y, w, 18),
-                               f"Bloom: {int(s['bloom'] * 100)}%", s["bloom"])
-        y += 26
-        s["shake"] = ui.slider(view, (x, y, w, 18),
+        game = self.bg_game or app.demo.game
+        app.renderer.render_game(game, hud=False)
+        ui.panel(view, (6, 4, GRID_W - 12, GRID_H - 8), "OPTIONS")
+        # ---- left: the tube ----
+        lx = 16
+        ui.label(view, lx, 24, "CRT PRESETS", ACCENT, ui.font)
+        px = lx
+        active = self._preset_name()
+        for name in CRT_PRESETS:
+            wbtn = len(name) * 4 + 10
+            if ui.button(view, (px, 33, wbtn, 12), name,
+                         accent=(name == active), font=ui.font):
+                s.update(CRT_PRESETS[name])
+            px += wbtn + 4
+        ui.label(view, lx, 50, "FINE TUNING", ACCENT, ui.font)
+        sy = 60
+        for i, (key, label) in enumerate(self.SLIDERS):
+            col_x = lx + (i % 2) * 112
+            row_y = sy + (i // 2) * 26
+            val = float(s.get(key, 0.0))
+            s[key] = round(ui.slider(
+                view, (col_x, row_y, 100, 18),
+                f"{label}: {int(val * 100)}%", val), 2)
+        # ---- right: game & audio ----
+        rx = 252
+        ui.label(view, rx, 24, "GAME & AUDIO", ACCENT, ui.font)
+        ry = 36
+        s["shake"] = ui.slider(view, (rx, ry, 100, 18),
                                f"Screen shake: {int(s['shake'] * 100)}%",
                                s["shake"], 0, 2)
-        y += 26
-        s["volume"] = ui.slider(view, (x, y, w // 2 - 4, 18),
+        s["volume"] = ui.slider(view, (rx + 112, ry, 100, 18),
                                 f"SFX: {int(s['volume'] * 100)}%",
                                 s["volume"])
-        s["music"] = ui.slider(view, (x + w // 2 + 4, y, w // 2 - 4, 18),
+        ry += 26
+        s["music"] = ui.slider(view, (rx, ry, 100, 18),
                                f"Music: {int(s['music'] * 100)}%",
                                s["music"])
-        y += 26
-        s["reduce_flash"] = ui.toggle(view, (x, y, w, 14),
+        ry += 26
+        s["reduce_flash"] = ui.toggle(view, (rx, ry, 100, 13),
                                       "Reduce flashing", s["reduce_flash"])
-        y += 18
-        s["colorblind"] = ui.toggle(view, (x, y, w, 14),
-                                    "Colorblind team colors", s["colorblind"])
-        y += 18
-        s["aberration"] = ui.toggle(view, (x, y, w // 2 - 4, 14),
-                                    "Color fringe", s["aberration"])
-        s["curvature"] = ui.toggle(view, (x + w // 2 + 4, y, w // 2 - 4, 14),
-                                   "Curvature", s["curvature"])
-        y += 18
-        fs = ui.toggle(view, (x, y, w, 14), "Fullscreen", s["fullscreen"])
+        s["colorblind"] = ui.toggle(view, (rx + 112, ry, 100, 13),
+                                    "Colorblind colors", s["colorblind"])
+        ry += 17
+        fs = ui.toggle(view, (rx, ry, 100, 13), "Fullscreen", s["fullscreen"])
         if fs != s["fullscreen"]:
             s["fullscreen"] = fs
             app.apply_window()
-        y += 18
-        s["show_fps"] = ui.toggle(view, (x, y, w // 2 - 4, 14), "Show FPS",
+        s["show_fps"] = ui.toggle(view, (rx + 112, ry, 100, 13), "Show FPS",
                                   s["show_fps"])
+        ry += 22
         cap = int(s.get("fps_cap", 144))
-        cap_label = "Uncapped" if cap == 0 else f"{cap} fps"
-        ui.selector(view, (x + w // 2 + 4, y - 9, w // 2 - 4, 22), "FPS CAP",
-                    cap_label, lambda: self._cycle_cap(-1),
-                    lambda: self._cycle_cap(1))
-        y += 18
+        ui.selector(view, (rx, ry, 100, 22), "FPS CAP",
+                    "Uncapped" if cap == 0 else f"{cap} fps",
+                    lambda: self._cycle_cap(-1), lambda: self._cycle_cap(1))
         scale = int(s.get("render_scale", 3))
-        ui.selector(view, (x, y - 4, w // 2 - 4, 22), "WINDOW SIZE",
+        ui.selector(view, (rx + 112, ry, 100, 22), "WINDOW",
                     f"{GRID_W * scale}x{GRID_H * scale}",
                     lambda: self._cycle_scale(-1), lambda: self._cycle_scale(1))
-        y += 24
-        if ui.button(view, (GRID_W // 2 - 40, GRID_H - 28, 80, 16), "BACK"):
+        if ui.button(view, (GRID_W // 2 - 40, GRID_H - 22, 80, 14), "BACK"):
             save_settings(s)
-            app.goto(MainMenu(app))
+            self.back_fn()
 
     def _cycle_cap(self, d):
         s = self.app.settings
