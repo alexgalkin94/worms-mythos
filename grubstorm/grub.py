@@ -3,8 +3,9 @@ import math
 
 from . import materials as M
 from .constants import (GRAVITY, GRUB_RADIUS, GRUB_WALK_SPEED, GRUB_STEP_UP,
-                        GRUB_JUMP_VY, GRUB_JUMP_VX, FALL_DMG_MIN_VY,
-                        FALL_DMG_SCALE, TERMINAL_VY, DROWN_DPS)
+                        GRUB_SCRAMBLE, GRUB_JUMP_VY, GRUB_JUMP_VX,
+                        FALL_DMG_MIN_VY, FALL_DMG_SCALE, TERMINAL_VY,
+                        DROWN_DPS)
 
 # body sample offsets for material contact (relative to centre)
 _BODY = [(0, 0), (-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, 1)]
@@ -39,24 +40,55 @@ class Grub:
         self.torching = 0
         self.anim = 0.0              # walk cycle phase (render)
         self.damage_taken_turn = 0.0
+        self.coyote = 0              # grace ticks to jump after a ledge
+        self.jump_buf = 0            # buffered jump press before landing
 
     # ----------------------------------------------------------- collision
     def _solid_at(self, world, x, y):
         return world.is_solid(x, y)
 
     def collides(self, world, x, y):
-        r = GRUB_RADIUS
-        for dx, dy in ((0, 0), (-r, 0), (r, 0), (0, -r), (0, r),
-                       (-r * 0.7, -r * 0.7), (r * 0.7, -r * 0.7),
-                       (-r * 0.7, r * 0.7), (r * 0.7, r * 0.7)):
-            if self._solid_at(world, x + dx, y + dy):
-                return True
-        return False
+        """Body collision: a narrow capsule (2 wide, ~5 tall) instead of a
+        fat circle, so the worm fits its own tunnels and doesn't snag on
+        every stray pixel."""
+        for dx in (-1.1, 1.1):
+            for dy in (-2.4, -0.8, 0.8, 2.4):
+                if self._solid_at(world, x + dx, y + dy):
+                    return True
+        return self._solid_at(world, x, y)
+
+    def _embedded(self, world):
+        """Grazing one ragged pixel is fine; actual burial is not."""
+        if self._solid_at(world, self.x, self.y):
+            return True
+        hits = 0
+        for dx in (-1.1, 1.1):
+            for dy in (-2.4, -0.8, 0.8, 2.4):
+                if self._solid_at(world, self.x + dx, self.y + dy):
+                    hits += 1
+        return hits >= 3
+
+    def resolve_embed(self, world):
+        """Buried by sand, debris, ice or a careless girder? Pop out of the
+        terrain instead of being stuck forever (classic Worms behavior)."""
+        if not self._embedded(world):
+            return
+        for r in range(1, 10):
+            for dx, dy in ((0, -r), (0, r), (-r, 0), (r, 0),
+                           (-r, -r), (r, -r), (-r, r), (r, r)):
+                if not self.collides(world, self.x + dx, self.y + dy):
+                    self.x += dx
+                    self.y += dy
+                    self.vx = self.vy = 0.0
+                    return
+        # fully entombed: shrug the material off
+        world.paint(self.x, self.y, 4, 0, mode="erase")
+        self.vx = self.vy = 0.0
 
     def ground_below(self, world):
-        return (self._solid_at(world, self.x, self.y + GRUB_RADIUS + 1) or
-                self._solid_at(world, self.x - 2, self.y + GRUB_RADIUS + 1) or
-                self._solid_at(world, self.x + 2, self.y + GRUB_RADIUS + 1))
+        """Grounded iff dropping one pixel would collide — exactly the same
+        capsule the movement uses, so resting and standing never disagree."""
+        return self.collides(world, self.x, self.y + 1)
 
     def head_in_liquid(self, world):
         return world.is_liquid(self.x, self.y - 2)
@@ -97,6 +129,9 @@ class Grub:
         world = game.world
         grav = GRAVITY * game.gravity_scale * world.gravity_dir
 
+        # never stay fused with the terrain (falling sand, ice, debris...)
+        self.resolve_embed(world)
+
         if self.burn_t > 0:
             self.burn_t -= 1
         if self.shock_t > 0:
@@ -112,17 +147,43 @@ class Grub:
         self._update_hazards(game)
 
     def _move_horizontal(self, world, dx):
-        """Walk with step-up and gentle slope descent. Returns True if moved."""
-        nx = self.x + dx
-        if not self.collides(world, nx, self.y):
-            self.x = nx
-            return True
-        for up in range(1, GRUB_STEP_UP + 1):
-            if not self.collides(world, nx, self.y - up):
+        """Walk with step-up assist and slope glue. Returns True if moved."""
+        moved = False
+        for try_dx in (dx, dx * 0.5):
+            nx = self.x + try_dx
+            if not self.collides(world, nx, self.y):
                 self.x = nx
-                self.y -= up
-                return True
-        return False
+                moved = True
+                break
+            stepped = False
+            for up in range(1, GRUB_STEP_UP + 1):
+                if not self.collides(world, nx, self.y - up):
+                    self.x = nx
+                    self.y -= up
+                    moved = stepped = True
+                    break
+            if stepped:
+                break
+            # scramble: short rough walls (crater rims) are clawed up one
+            # pixel per tick instead of being a hard stop
+            for h in range(GRUB_STEP_UP + 1, GRUB_SCRAMBLE + 1):
+                if not self.collides(world, nx, self.y - h):
+                    if not self.collides(world, self.x, self.y - 1):
+                        self.y -= 1
+                        return True
+                    break
+        if moved and not self.ground_below(world):
+            # slope glue: hug gentle downhills instead of going airborne
+            y0 = self.y
+            for _ in range(GRUB_STEP_UP + 1):
+                if self.collides(world, self.x, self.y + 1):
+                    break
+                self.y += 1
+                if self.ground_below(world):
+                    break
+            if not self.ground_below(world):
+                self.y = y0           # real ledge: let gravity handle it
+        return moved
 
     def _update_walker(self, game, inp, active, grav):
         world = game.world
@@ -147,29 +208,47 @@ class Grub:
             self.fall_peak_vy = 0.0
             self.vy = 0.0
             self.vx *= 0.99 if slippery else 0.6
+            self.coyote = 9                       # jump grace after ledges
         else:
             self.on_ground = False
+            if self.coyote > 0:
+                self.coyote -= 1
+        if self.jump_buf > 0:
+            self.jump_buf -= 1
 
         if active and inp is not None and not self.flying:
             speed = GRUB_WALK_SPEED * (0.35 if sticky else 1.0)
             if inp.left or inp.right:
                 d = -1 if inp.left else 1
-                if self.facing != d:
-                    self.facing = d
+                if inp.aim is None and self.facing != d:
+                    self.facing = d               # classic tap-to-turn
                 elif self.on_ground:
                     self._move_horizontal(world, d * speed)
                     self.anim += 0.3
                 elif in_liquid:                     # swim weakly
                     self.vx += d * 0.05
+            # aiming: mouse sets the angle outright, keys nudge it
+            if inp.aim is not None:
+                a = inp.aim
+                self.facing = 1 if abs(a) <= math.pi / 2 else -1
+                rel = a if self.facing == 1 else math.pi - a
+                rel = (rel + math.pi) % (2 * math.pi) - math.pi
+                self.aim = max(-math.pi / 2, min(math.pi / 2, rel))
             if inp.aim_up:
                 self.aim = max(-math.pi / 2, self.aim - 0.035)
             if inp.aim_down:
                 self.aim = min(math.pi / 2, self.aim + 0.035)
-            if inp.jump and self.on_ground:
+            # buffered + coyote jumping: presses land even with sloppy timing
+            if inp.jump:
+                self.jump_buf = 8
+            if self.jump_buf > 0 and (self.on_ground or self.coyote > 0):
+                self.jump_buf = 0
+                self.coyote = 0
                 self.vy = GRUB_JUMP_VY * (0.7 if in_liquid else 1.0)
                 self.vx = self.facing * GRUB_JUMP_VX
                 self.on_ground = False
-            if inp.backflip and self.on_ground:
+            if inp.backflip and (self.on_ground or self.coyote > 0):
+                self.coyote = 0
                 self.vy = GRUB_JUMP_VY * 1.25
                 self.vx = -self.facing * GRUB_JUMP_VX * 0.6
                 self.on_ground = False

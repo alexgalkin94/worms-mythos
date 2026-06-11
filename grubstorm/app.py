@@ -262,23 +262,57 @@ class GameScreen(Screen):
         self.pending_weapon = -1
         self.pending_click = None
         self.stalled = False
+        self.mouse_aim = True
+        self._fire_block = False
+        self._last_mouse = pygame.mouse.get_pos()
 
     # ----------------------------------------------------------- input
+    def _mouse_world(self):
+        mx, my = pygame.mouse.get_pos()
+        win = pygame.display.get_surface().get_size()
+        return (mx * GRID_W / max(1, win[0]), my * GRID_H / max(1, win[1]))
+
     def _local_input(self):
         keys = pygame.key.get_pressed()
+        mouse = pygame.mouse.get_pressed()
         inp = InputFrame()
         inp.left = keys[pygame.K_LEFT] or keys[pygame.K_a]
         inp.right = keys[pygame.K_RIGHT] or keys[pygame.K_d]
-        inp.aim_up = keys[pygame.K_UP] or keys[pygame.K_w]
-        inp.aim_down = keys[pygame.K_DOWN] or keys[pygame.K_s]
-        inp.fire = keys[pygame.K_SPACE]
+        if not self.mouse_aim:
+            inp.aim_up = keys[pygame.K_UP] or keys[pygame.K_w]
+            inp.aim_down = keys[pygame.K_DOWN] or keys[pygame.K_s]
+        spec = WEAPONS[self.game.weapon]
+        if not mouse[0]:
+            self._fire_block = False
+        inp.fire = keys[pygame.K_f] or (
+            mouse[0] and spec.target != "click" and not self.panel_open
+            and not self.paused and not self._fire_block)
         inp.jump = self._jump
         inp.backflip = self._backflip
         inp.weapon = self.pending_weapon
         inp.click = self.pending_click
+        # mouse aiming: absolute angle from the active grub to the cursor,
+        # quantized exactly like the net encoding so lockstep stays bit-true
+        g = self.game.active_grub
+        if self.mouse_aim and g is not None:
+            import math
+            gx, gy = self._mouse_world()
+            a = math.atan2(gy - g.y, gx - g.x)
+            inp.aim = round(a * 1000) / 1000.0
         self.pending_weapon = -1
         self.pending_click = None
         return inp
+
+    def _cycle_weapon(self, d):
+        g = self.game
+        team = g.current_team()
+        n = len(WEAPONS)
+        i = g.weapon
+        for _ in range(n):
+            i = (i - d) % n
+            if team.ammo.get(i, 0) != 0:
+                self.pending_weapon = i
+                return
 
     def update(self, events):
         app = self.app
@@ -290,25 +324,36 @@ class GameScreen(Screen):
                         self.panel_open = False
                     else:
                         self.paused = not self.paused
-                elif e.key == pygame.K_RETURN:
+                elif e.key in (pygame.K_SPACE, pygame.K_RETURN):
                     self._jump = True
-                elif e.key == pygame.K_BACKSPACE:
+                elif e.key in (pygame.K_BACKSPACE, pygame.K_LSHIFT):
                     self._backflip = True
+                elif e.key in (pygame.K_w, pygame.K_s, pygame.K_UP,
+                               pygame.K_DOWN):
+                    self.mouse_aim = False      # keys take over the aim
                 elif e.key == pygame.K_TAB:
                     self.panel_open = not self.panel_open
+            elif e.type == pygame.MOUSEMOTION:
+                lx, ly = self._last_mouse
+                if abs(e.pos[0] - lx) + abs(e.pos[1] - ly) > 3:
+                    self.mouse_aim = True       # ...until the mouse moves
+                    self._last_mouse = e.pos
             elif e.type == pygame.MOUSEWHEEL:
                 if self.panel_open:
                     self.panel_scroll = getattr(self, "panel_scroll", 0) - \
                         e.y * 20
+                elif not self.paused:
+                    self._cycle_weapon(e.y)     # quick weapon cycling
             elif e.type == pygame.MOUSEBUTTONDOWN:
                 if e.button == 3:
                     self.panel_open = not self.panel_open
+                elif e.button == 1 and self.panel_open:
+                    self._fire_block = True     # selection click, not a shot
                 elif e.button == 1 and not self.panel_open and not self.paused:
-                    mx, my = pygame.mouse.get_pos()
-                    win = pygame.display.get_surface().get_size()
-                    gx = mx * GRID_W // max(1, win[0])
-                    gy = my * GRID_H // max(1, win[1])
-                    self.pending_click = (gx, gy)
+                    spec = WEAPONS[self.game.weapon]
+                    if spec.target == "click":
+                        gx, gy = self._mouse_world()
+                        self.pending_click = (int(gx), int(gy))
         if self.paused:
             return
         for _ in range(app.sim_steps):
@@ -575,10 +620,11 @@ class OptionsScreen(Screen):
 
 
 HELP_TEXT = [
-    ("MOVE", "Arrows / WASD walk & aim. ENTER jump, BACKSPACE backflip."),
-    ("FIGHT", "SPACE: hold to charge, release to fire. TAB or right-click"),
-    ("", "opens the arsenal. Click-weapons (airstrike, teleport...) fire"),
-    ("", "where you left-click."),
+    ("MOVE", "A/D walk. SPACE jump (coyote + buffered). SHIFT backflip."),
+    ("AIM", "Aim with the mouse. W/S or arrows fine-tune by keyboard."),
+    ("FIGHT", "Hold LEFT MOUSE (or F) to charge, release to fire."),
+    ("", "Mouse wheel cycles weapons. TAB or right-click: full arsenal."),
+    ("", "Click-weapons (airstrike, teleport...) fire where you click."),
     ("WORLD", "Everything is simulated. Water flows, oil burns, acid eats"),
     ("", "terrain, gas explodes, lava melts, ice freezes, electricity"),
     ("", "travels through water and metal. Use the world as a weapon."),

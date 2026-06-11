@@ -18,7 +18,8 @@ TERMINAL_VY = 4.0
 
 GRUB_RADIUS = 2.6
 GRUB_WALK_SPEED = 0.55
-GRUB_STEP_UP = 3                    # max pixels a grub can step up
+GRUB_STEP_UP = 4                    # max pixels a grub can step up
+GRUB_SCRAMBLE = 10                  # short rough walls are climbed slowly
 GRUB_JUMP_VY = -2.25
 GRUB_JUMP_VX = 0.9
 FALL_DMG_MIN_VY = 2.6

@@ -526,6 +526,18 @@ class World:
             sub[destroy] = M.EMPTY
             self.burn[sy, sx][destroy] = 0
             self.rest[sy, sx] = 0     # liquids around the crater wake up
+            # shave the 1px needles and shelves blasts leave behind —
+            # they wedge worms into unwalkable slots
+            solid2 = M.SOLID[sub]
+            le = np.ones_like(solid2); re = np.ones_like(solid2)
+            le[:, 1:] = ~solid2[:, :-1]
+            re[:, :-1] = ~solid2[:, 1:]
+            ue = np.ones_like(solid2); de = np.ones_like(solid2)
+            ue[1:, :] = ~solid2[:-1, :]
+            de[:-1, :] = ~solid2[1:, :]
+            needle = solid2 & ((le & re) | (ue & de)) & \
+                (dist <= r * 1.4) & (sub != M.BEDROCK)
+            sub[needle] = M.EMPTY
             # heat + sparks of fire inside the blast
             self.temp[sy, sx] += heat * np.clip(1.0 - dist / max(r, 1), 0, 1) * 4
             if make_fire:

@@ -22,7 +22,9 @@ from .weapons import WEAPONS, W_BY_KEY, Projectile, default_ammo
 class InputFrame:
     """One tick of player intent. Serializable for net lockstep."""
     __slots__ = ("left", "right", "aim_up", "aim_down", "jump", "backflip",
-                 "fire", "weapon", "click")
+                 "fire", "weapon", "click", "aim")
+
+    AIM_NONE = 9999                # sentinel: keyboard aiming this tick
 
     def __init__(self):
         self.left = self.right = self.aim_up = self.aim_down = False
@@ -30,23 +32,26 @@ class InputFrame:
         self.fire = False
         self.weapon = -1
         self.click = None          # (x, y) world cells
+        self.aim = None            # absolute world angle (mouse aiming)
 
     def encode(self):
         bits = (self.left | self.right << 1 | self.aim_up << 2 |
                 self.aim_down << 3 | self.jump << 4 | self.backflip << 5 |
                 self.fire << 6)
         c = [-1, -1] if self.click is None else [int(self.click[0]), int(self.click[1])]
-        return [bits, self.weapon, c[0], c[1]]
+        a = self.AIM_NONE if self.aim is None else int(round(self.aim * 1000))
+        return [bits, self.weapon, c[0], c[1], a]
 
     @classmethod
     def decode(cls, data):
         f = cls()
-        bits, f.weapon, cx, cy = data
+        bits, f.weapon, cx, cy, a = data
         f.left = bool(bits & 1); f.right = bool(bits & 2)
         f.aim_up = bool(bits & 4); f.aim_down = bool(bits & 8)
         f.jump = bool(bits & 16); f.backflip = bool(bits & 32)
         f.fire = bool(bits & 64)
         f.click = None if cx < 0 else (cx, cy)
+        f.aim = None if a == cls.AIM_NONE else a / 1000.0
         return f
 
 

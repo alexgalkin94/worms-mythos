@@ -57,14 +57,18 @@ with the same name hands them their team back via a full state snapshot.
 
 ## Controls
 
-| Key | Action |
+Modern scheme: aim with the mouse, fire with the mouse, move with the keys.
+Jumping has coyote time and input buffering, short rough walls are scrambled
+up automatically, and a worm buried by sand or debris digs itself out.
+
+| Input | Action |
 |---|---|
-| ← → / A D | walk (tap away from facing to turn first) |
-| ↑ ↓ / W S | aim (also rope length while swinging) |
-| SPACE | hold to charge, release to fire |
-| ENTER | jump · BACKSPACE backflip · jump again to release the rope |
-| TAB / right-click | weapon arsenal |
-| left-click | target for click-weapons (airstrike, teleport, lightning…) |
+| A D / ← → | walk |
+| mouse | aim (W/S or ↑↓ fine-tune; keys take over until the mouse moves) |
+| left mouse (or F) | hold to charge, release to fire |
+| left mouse | target for click-weapons (airstrike, teleport, lightning…) |
+| SPACE / ENTER | jump (also releases the rope) · SHIFT/BACKSPACE backflip |
+| mouse wheel | cycle weapons · TAB / right-click full arsenal |
 | ESC | pause |
 
 ## The world
