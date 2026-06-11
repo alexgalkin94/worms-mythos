@@ -992,6 +992,18 @@ class App:
     def quit(self):
         self.running = False
 
+    def _update_ambience(self, mood):
+        if mood == getattr(self, "_amb_mood", None):
+            if self._amb_ch is not None:
+                self._amb_ch.set_volume(
+                    float(self.settings.get("volume", 0.8)) * 0.4)
+            return
+        snd = self.audio.ambience(mood)
+        if getattr(self, "_amb_ch", None) is not None:
+            self._amb_ch.fadeout(1200)
+        self._amb_mood = mood
+        self._amb_ch = snd.play(loops=-1, fade_ms=1500) if snd else None
+
     def step_demo(self):
         for _ in range(self.sim_steps):
             self.demo.step()
@@ -1017,12 +1029,14 @@ class App:
             # mood-aware soundtrack: menus get the theme, arenas their tone
             if isinstance(self.screen, GameScreen):
                 biome = self.screen.settings.get("biome", "island")
-                self.music.want(BIOME_MOOD.get(biome, "warm"))
+                mood = BIOME_MOOD.get(biome, "warm")
             elif isinstance(self.screen, sandbox_mod.SandboxScreen):
-                self.music.want("deep")
+                mood = "deep"
             else:
-                self.music.want("menu")
+                mood = "menu"
+            self.music.want(mood)
             self.music.update()
+            self._update_ambience(mood)
             view = self.renderer.view
             self.screen.draw(view)
             if self.settings.get("show_fps"):

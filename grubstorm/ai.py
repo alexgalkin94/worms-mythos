@@ -99,10 +99,32 @@ class Bot:
         def has(key):
             return ammo.get(W_BY_KEY[key], 0) != 0
 
+        def clear_los():
+            hit = game.world.raycast(me.x, me.y - 1, target.x - me.x,
+                                     target.y - me.y + 1, dist)
+            return hit is None or \
+                math.hypot(hit[0] - me.x, hit[1] - me.y) > dist - 5
+
         # melee when right next to someone
         if dist < 10 and has("hammer"):
             return dict(kind="melee", weapon=W_BY_KEY["hammer"],
                         face=1 if target.x > me.x else -1)
+        # plant a mine at their feet and waddle away, the classic insult
+        if dist < 22 and has("mine") and rng.random() < 0.5:
+            return dict(kind="mine", weapon=W_BY_KEY["mine"],
+                        face=1 if target.x > me.x else -1,
+                        flee=me.x - (40 if target.x > me.x else -40))
+        # direct-fire weapons when the line is clear
+        if dist < 70 and clear_los():
+            ang = math.atan2(target.y - me.y, target.x - me.x)
+            if has("shotgun") and rng.random() < 0.55:
+                return dict(kind="direct", weapon=W_BY_KEY["shotgun"],
+                            angle=ang)
+            if dist < 52 and rng.random() < self.persona["chaos"]:
+                for key in ("freeze", "spark", "water"):
+                    if has(key) and rng.random() < 0.5:
+                        return dict(kind="direct", weapon=W_BY_KEY[key],
+                                    angle=ang)
         # super weapons for the dramatic
         if rng.random() < self.persona["supers"] * 0.25:
             for key in ("melon", "blackhole", "napalm", "lightning"):
@@ -216,6 +238,28 @@ class Bot:
         if plan["kind"] == "melee":
             me.facing = plan["face"]
             if t == 50:
+                inp.fire = True
+            return inp
+
+        if plan["kind"] == "mine":
+            me.facing = plan["face"]
+            if t == 48:
+                inp.fire = True
+            elif t > 52:                       # leg it!
+                d = 1 if plan["flee"] > me.x else -1
+                inp.right = d > 0
+                inp.left = d < 0
+                if t % 40 < 2:
+                    inp.jump = True
+            return inp
+
+        if plan["kind"] == "direct":
+            ang = plan["angle"]
+            me.facing = 1 if math.cos(ang) >= 0 else -1
+            rel = ang if me.facing == 1 else math.pi - ang
+            rel = (rel + math.pi) % (2 * math.pi) - math.pi
+            me.aim = max(-math.pi / 2, min(math.pi / 2, rel))
+            if t == 55:
                 inp.fire = True
             return inp
 

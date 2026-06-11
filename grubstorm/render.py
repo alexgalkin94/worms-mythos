@@ -605,7 +605,22 @@ class Renderer:
             elif kind == "alarm":
                 audio.play("alarm", 0.8)
             elif kind.startswith("fire_"):
-                audio.play("shoot", 0.5)
+                key = kind[5:]
+                table = {"shotgun": "bang", "water": "spray",
+                         "freeze": "freeze", "spark": "zap",
+                         "lightning": "zap", "rope": "rope",
+                         "drill": "grind", "torch": "whoosh",
+                         "napalm": "whoosh", "hammer": "thud",
+                         "grenade": "throw", "cluster": "throw",
+                         "acid": "throw", "oil": "throw", "sludge": "throw",
+                         "slime": "throw", "gas": "throw", "steam": "throw",
+                         "powder": "throw", "crystal": "throw",
+                         "lavabomb": "throw", "melon": "throw",
+                         "blackhole": "warp", "teleport": "warp",
+                         "gravflip": "warp"}
+                audio.play(table.get(key, "shoot"), 0.55)
+            elif kind == "lockon":
+                audio.play("lockon", 0.5)
             elif kind == "shot":
                 audio.play("shoot", 0.7)
             elif kind == "tic":
