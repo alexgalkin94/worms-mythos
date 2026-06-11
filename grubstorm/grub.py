@@ -42,6 +42,8 @@ class Grub:
         self.damage_taken_turn = 0.0
         self.coyote = 0              # grace ticks to jump after a ledge
         self.jump_buf = 0            # buffered jump press before landing
+        self.dmg_acc = 0.0           # accumulating hit for the damage popup
+        self.dmg_timer = 0
 
     # ----------------------------------------------------------- collision
     def _solid_at(self, world, x, y):
@@ -102,6 +104,8 @@ class Grub:
             return
         self.hp -= dmg
         self.damage_taken_turn += dmg
+        self.dmg_acc += dmg
+        self.dmg_timer = 40
         if self.hp <= 0:
             self.hp = 0
             self.die(game)

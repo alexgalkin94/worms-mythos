@@ -66,6 +66,8 @@ class Team:
         self.next_grub = 0
         self.damage_dealt = 0.0
         self.kills = 0
+        self.shots = 0
+        self.max_hit = 0.0
 
     def alive_grubs(self):
         return [g for g in self.grubs if g.alive]
@@ -137,6 +139,8 @@ class Game:
         self.fx: list[tuple] = []             # (kind, x, y, mag) for AV layer
         self.tracers: list[list] = []         # [x0, y0, x1, y1, ttl, color]
         self.toasts: list[list] = []          # [x, y, text, ttl]
+        self.floaters: list[list] = []        # [x, y, amount, ttl, team]
+        self.ghosts: list[list] = []          # [x, y, ttl] souls going up
         self.headstones: list[tuple] = []
 
         # teams
@@ -170,7 +174,7 @@ class Game:
         self.tick = 0
         self.turn_no = 0
         self.phase = Game.PH_START
-        self.phase_t = 90
+        self.phase_t = 60
         self.turn_team = 0
         self.active_grub: Grub | None = self.teams[0].pick_next()
         self.turn_timer = settings.get("turn_seconds", TURN_SECONDS) * 60
@@ -258,6 +262,7 @@ class Game:
                 g.hurt(dmg, self)
                 if attacker is not None and g.team != self.turn_team:
                     attacker.damage_dealt += dmg
+                    attacker.max_hit = max(attacker.max_hit, dmg)
                     if pre and not g.alive:
                         attacker.kills += 1
                 nd = max(d, 2.0)
@@ -304,6 +309,11 @@ class Game:
 
     def on_grub_death(self, grub):
         self.fx_event("death", grub.x, grub.y, 2)
+        if grub.dmg_acc >= 1 and len(self.floaters) < 24:
+            self.floaters.append([grub.x, grub.y - 8,
+                                  int(round(grub.dmg_acc)), 80, grub.team])
+            grub.dmg_acc = 0.0
+        self.ghosts.append([grub.x, grub.y - 2, 150])
         self.headstones.append((grub.x, grub.y, grub.team))
         self.apply_explosion(grub.x, grub.y, 7, 26, silentish=False)
 
@@ -354,7 +364,7 @@ class Game:
         self.active_grub = team.pick_next()
         self.turn_timer = self.settings.get("turn_seconds", TURN_SECONDS) * 60
         self.phase = Game.PH_START
-        self.phase_t = 70
+        self.phase_t = 55
         self.charge = 0.0
         self.charging = False
         self.shots_left = 1
@@ -438,6 +448,25 @@ class Game:
             to[1] -= 0.12
             to[3] -= 1
         self.toasts = [to for to in self.toasts if to[3] > 0]
+        for fl in self.floaters:
+            fl[1] -= 0.18
+            fl[3] -= 1
+        self.floaters = [fl for fl in self.floaters if fl[3] > 0]
+        for gh in self.ghosts:
+            gh[1] -= 0.22
+            gh[2] -= 1
+        self.ghosts = [gh for gh in self.ghosts if gh[2] > 0 and gh[1] > -8]
+        # classic damage numbers: pop the accumulated hit once it settles
+        for t in self.teams:
+            for gr in t.grubs:
+                if gr.dmg_timer > 0:
+                    gr.dmg_timer -= 1
+                    if gr.dmg_timer == 0 and gr.dmg_acc >= 1:
+                        if len(self.floaters) < 24:
+                            self.floaters.append([gr.x, gr.y - 8,
+                                                  int(round(gr.dmg_acc)),
+                                                  80, gr.team])
+                        gr.dmg_acc = 0.0
         # blowtorch/drill are hold-to-dig: releasing FIRE stops them
         if inp is not None and not inp.fire:
             from .weapons import Stream
@@ -508,15 +537,15 @@ class Game:
             self.settle_t += 1
             live_proj = any(not p.passive for p in self.projectiles)
             busy = (live_proj or self.entities or
-                    w.activity > 60 or len(w.pending_detonations) > 0)
+                    w.activity > 90 or len(w.pending_detonations) > 0)
             if not busy or self.settle_t > SETTLE_TIMEOUT * 60:
                 self.phase = Game.PH_TURNEND
-                self.phase_t = 30
+                self.phase_t = 18
                 self._turn_end_chores()
         elif self.phase == Game.PH_TURNEND:
             self.phase_t -= 1
             busy = any(not p.passive for p in self.projectiles) or \
-                w.activity > 80
+                w.activity > 110
             if self.phase_t <= 0 and not busy:
                 self._next_turn()
 
@@ -561,7 +590,7 @@ class Game:
                 self.charge = 0.0
             if self.charging:
                 if inp.fire:
-                    self.charge = min(1.0, self.charge + 1 / 72)
+                    self.charge = min(1.0, self.charge + 1 / 66)
                     if self.charge >= 1.0:
                         self._fire(spec, 1.0, getattr(self, "_homing_target", None))
                 elif fire_released or not inp.fire:
@@ -593,6 +622,7 @@ class Game:
         if spec.fire_fn(self, g, angle, power, click) is False:
             return                # blocked teleport etc: nothing is spent
         self._homing_target = None
+        team.shots += 1
         self.fx_event("fire_" + spec.key, g.x, g.y, 1)
         # switching the jetpack OFF refunds nothing because it costs nothing
         if spec.key == "jetpack" and not g.jetpack:
@@ -718,6 +748,8 @@ class Game:
                 g.damage_taken_turn = gd["dmg_turn"]
                 g.magic_cd = gd["magic_cd"]
         self.projectiles.clear(); self.entities.clear()
+        self.floaters = []
+        self.ghosts = []
         from .weapons import make_mine
         for mx, my, mvx, mvy, mage in snap.get("mines", []):
             m = make_mine(mx, my, mvx, mvy)

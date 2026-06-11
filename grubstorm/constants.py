@@ -17,10 +17,10 @@ WIND_ACCEL = 0.012                  # per-tick wind acceleration on projectiles
 TERMINAL_VY = 4.0
 
 GRUB_RADIUS = 2.6
-GRUB_WALK_SPEED = 0.55
+GRUB_WALK_SPEED = 0.62
 GRUB_STEP_UP = 4                    # max pixels a grub can step up
 GRUB_SCRAMBLE = 10                  # short rough walls are climbed slowly
-GRUB_JUMP_VY = -2.25
+GRUB_JUMP_VY = -2.35
 GRUB_JUMP_VX = 0.9
 FALL_DMG_MIN_VY = 2.6
 FALL_DMG_SCALE = 16.0
@@ -28,7 +28,7 @@ FALL_DMG_SCALE = 16.0
 # --- Turn structure --------------------------------------------------------
 TURN_SECONDS = 45
 RETREAT_SECONDS = 3
-SETTLE_TIMEOUT = 9.0                # max seconds to wait for world to calm down
+SETTLE_TIMEOUT = 6.0                # max seconds to wait for world to calm down
 SUDDEN_DEATH_AFTER = 8 * 60        # seconds of match time
 CRATE_CHANCE = 0.35                # chance per turn-end
 

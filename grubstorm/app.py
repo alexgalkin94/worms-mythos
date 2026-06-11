@@ -408,11 +408,24 @@ class GameScreen(Screen):
         if self.game.turn_no != getattr(self, "_seen_turn", -1):
             self._seen_turn = self.game.turn_no
             cam.follow = True                   # new turn recaptures camera
+        # dramatic finish: brief slow motion + zoom onto the final blow
+        if self.game.phase == Game.PH_OVER and self.over_t < 80:
+            cam.zoom = min(2.2, cam.zoom + 0.012)
+            if app.ui.t % 3:
+                return
         for _ in range(app.sim_steps):
             self._tick_once()
             self._jump = self._backflip = False
             if app.screen is not self:          # match ended mid-frame
                 return
+        # offline fast-forward: hold SPACE while the dust settles
+        if self.session is None and \
+                self.game.phase in (Game.PH_RESOLVE, Game.PH_TURNEND) and \
+                pygame.key.get_pressed()[pygame.K_SPACE]:
+            for _ in range(2):
+                self._tick_once()
+                if app.screen is not self:
+                    return
 
     def _tick_once(self):
         app = self.app

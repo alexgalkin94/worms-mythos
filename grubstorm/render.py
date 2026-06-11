@@ -391,6 +391,23 @@ class Renderer:
             if rng_r:
                 pygame.draw.circle(v, (120, 104, 70), (int(g.x), int(g.y)),
                                    rng_r, 1)
+        for (x, y, amount, ttl, team) in game.floaters:
+            col = (255, 240, 230) if amount < 30 else (255, 160, 110) \
+                if amount < 60 else (255, 90, 70)
+            s = self.font_out.render(f"-{amount}", True, col)
+            s.set_alpha(min(255, ttl * 8))
+            v.blit(s, (int(x) - s.get_width() // 2, int(y)))
+        for (x, y, ttl) in game.ghosts:
+            a = min(200, ttl * 4)
+            gs2 = pygame.Surface((9, 10), pygame.SRCALPHA)
+            pygame.draw.circle(gs2, (235, 240, 255, a), (4, 4), 4)
+            pygame.draw.polygon(gs2, (235, 240, 255, a),
+                                [(0, 4), (8, 4), (7, 9), (5, 7), (3, 9),
+                                 (1, 7)])
+            for ex in (2, 5):
+                gs2.set_at((ex, 3), (40, 40, 70, a))
+            wob = math.sin(self._t * 0.1 + x) * 1.5
+            v.blit(gs2, (int(x + wob) - 4, int(y) - 5))
         for (x, y, text, ttl) in game.toasts:
             s = self.font_out.render(text, True, (255, 130, 110))
             s.set_alpha(min(255, ttl * 6))
