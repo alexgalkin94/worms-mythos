@@ -266,6 +266,8 @@ class GameScreen(Screen):
         self.stalled = False
         self.mouse_aim = True
         self._fire_block = False
+        self._jump = False
+        self._backflip = False
         self._last_mouse = pygame.mouse.get_pos()
 
     # ----------------------------------------------------------- input
@@ -296,6 +298,7 @@ class GameScreen(Screen):
             and not self.paused and not self._fire_block)
         inp.jump = self._jump
         inp.backflip = self._backflip
+        self._jump = self._backflip = False     # consumed by this tick
         inp.weapon = self.pending_weapon
         inp.click = self.pending_click
         # mouse aiming: absolute angle from the active grub to the cursor,
@@ -323,7 +326,9 @@ class GameScreen(Screen):
 
     def update(self, events):
         app = self.app
-        self._jump = self._backflip = False
+        # NOTE: edge inputs (_jump/_backflip/_fire_block/pending_*) are
+        # latched here and consumed by sim ticks. At high FPS most frames
+        # have NO sim tick — resetting them per frame would eat inputs.
         for e in events:
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
@@ -351,6 +356,9 @@ class GameScreen(Screen):
                         e.y * 20
                 elif not self.paused:
                     self._cycle_weapon(e.y)     # quick weapon cycling
+            elif e.type == pygame.MOUSEBUTTONUP:
+                if e.button == 1:
+                    self._fire_block = False
             elif e.type == pygame.MOUSEBUTTONDOWN:
                 if e.button == 3:
                     self.panel_open = not self.panel_open
