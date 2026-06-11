@@ -464,6 +464,15 @@ class GameScreen(Screen):
             self.session.pump(self)
         if not self.stalled:
             g.step(inp)
+            if self.session and g.tick % 600 == 0 and g.tick > 0:
+                import hashlib
+                h = hashlib.sha256(g.world.mat.tobytes()).hexdigest()[:12]
+                self.session.check_state(g.tick, h)
+                # late comparison: a peer hash may arrive after our tick
+                peer = self.session.peer_hashes.get(g.tick)
+                own = self.session.own_hashes.get(g.tick)
+                if peer is not None and own is not None and peer != own:
+                    self.session.desynced = True
         app.renderer.consume_fx(g, app.audio)
 
     # ------------------------------------------------------------ draw
@@ -480,6 +489,10 @@ class GameScreen(Screen):
             ui.label(view, GRID_W // 2, GRID_H - 52,
                      "connection lost — ESC to leave", (255, 100, 90),
                      ui.font_m, center=True)
+        if self.session and self.session.desynced:
+            ui.label(view, GRID_W // 2, GRID_H - 62,
+                     "DESYNC DETECTED — please restart the match",
+                     (255, 90, 80), ui.font_m, center=True)
         if self.paused:
             ui.panel(view, (GRID_W // 2 - 60, 60, 120, 132), "PAUSED")
             y = 85
@@ -593,16 +606,27 @@ class ResultsScreen(Screen):
         who = g.teams[g.winner].name if g.winner is not None else "NOBODY"
         ui.label(view, GRID_W // 2, 46, f"{who} WINS!", ACCENT,
                  ui.font_b, center=True)
-        y = 70
+        y = 66
+        hdr = "TEAM            HP  ALIVE  DMG  KILLS  SHOTS  BEST HIT"
+        ui.label(view, GRID_W // 2 - 100, y, hdr, DIM, ui.font)
+        y += 11
         for t in sorted(g.teams, key=lambda t: -t.total_hp()):
             col = app.renderer.team_color(t.color_idx)
-            pygame.draw.rect(view, col, (GRID_W // 2 - 96, y + 2, 6, 6))
-            alive = len(t.alive_grubs())
-            ui.label(view, GRID_W // 2 - 86, y,
-                     f"{t.name}  hp:{int(t.total_hp())}  alive:{alive}"
-                     f"  dmg:{int(t.damage_dealt)}  kills:{t.kills}",
-                     FG, ui.font)
-            y += 14
+            pygame.draw.rect(view, col, (GRID_W // 2 - 108, y + 1, 5, 5))
+            row = (f"{t.name[:14]:14s} {int(t.total_hp()):4d}  "
+                   f"{len(t.alive_grubs()):3d}  {int(t.damage_dealt):4d}  "
+                   f"{t.kills:3d}   {t.shots:3d}    {int(t.max_hit):3d}")
+            ui.label(view, GRID_W // 2 - 100, y, row, FG, ui.font)
+            y += 11
+        # fallen heroes
+        dead = [gr.name for t in g.teams for gr in t.grubs if not gr.alive]
+        if dead:
+            y += 6
+            ui.label(view, GRID_W // 2, y, "IN MEMORIAM", DIM, ui.font,
+                     center=True)
+            y += 10
+            ui.label(view, GRID_W // 2, y, ", ".join(dead[:8]), ACCENT2,
+                     ui.font, center=True)
         if self.session is None:
             if ui.button(view, (GRID_W // 2 - 80, GRID_H - 52, 75, 16),
                          "REMATCH", accent=True):
@@ -882,6 +906,9 @@ class LobbyScreen(Screen):
         msgs = self.sess.poll()
         for m in msgs:
             if m["t"] == "start":
+                if m.get("proto") != net_mod.PROTOCOL:
+                    self.error = "version mismatch - update your game!"
+                    continue
                 self.app.goto(GameScreen(self.app, m["settings"], self.sess))
                 return
             if m["t"] == "error":
@@ -950,7 +977,8 @@ class LobbyScreen(Screen):
             "biome": list(BIOMES)[self.biome_i],
             "teams": teams,
         }
-        self.sess.send({"t": "start", "settings": settings})
+        self.sess.send({"t": "start", "settings": settings,
+                        "proto": net_mod.PROTOCOL})
 
 
 # ================================================================== app ====

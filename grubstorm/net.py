@@ -16,6 +16,8 @@ import queue
 
 from .game import InputFrame
 
+PROTOCOL = 3       # bump when the sim or input encoding changes
+
 
 class Session:
     def __init__(self, host, port, name, timeout=6.0):
@@ -29,6 +31,9 @@ class Session:
         self.roster = []
         self.alive = True
         self.input_buf = {}
+        self.peer_hashes = {}
+        self.own_hashes = {}
+        self.desynced = False
         self.started = False
         self.snapshot_requests = []     # pids waiting for a snapshot (host)
         self.pending_snapshot = None    # received snapshot (joiner)
@@ -86,7 +91,7 @@ class Session:
 
     # --------------------------------------------------------------- lobby
     def create_room(self):
-        self.send({"t": "create", "name": self.name})
+        self.send({"t": "create", "name": self.name, "proto": PROTOCOL})
         m = self._wait_for(("created", "error"))
         if m["t"] == "error":
             raise RuntimeError(m.get("msg", "server error"))
@@ -94,7 +99,8 @@ class Session:
         self.host_pid = self.pid
 
     def join_room(self, code):
-        self.send({"t": "join", "code": code, "name": self.name})
+        self.send({"t": "join", "code": code, "name": self.name,
+                   "proto": PROTOCOL})
         m = self._wait_for(("joined", "error"))
         if m["t"] == "error":
             raise RuntimeError(m.get("msg", "room not found"))
@@ -115,6 +121,8 @@ class Session:
             self.snapshot_requests.append(m.get("from"))
         elif t == "snapshot":
             self.pending_snapshot = m
+        elif t == "statehash":
+            self.peer_hashes[m["tick"]] = m["h"]
         return t
 
     def poll(self):
@@ -133,6 +141,18 @@ class Session:
     # ---------------------------------------------------------------- game
     def send_input(self, tick, inp: InputFrame):
         self.send({"t": "input", "tick": tick, "d": inp.encode()})
+
+    def check_state(self, tick, h):
+        """Record our hash, compare against peers, broadcast ours."""
+        self.own_hashes[tick] = h
+        if len(self.own_hashes) > 8:
+            del self.own_hashes[min(self.own_hashes)]
+        self.send({"t": "statehash", "tick": tick, "h": h})
+        peer = self.peer_hashes.get(tick)
+        if peer is not None and peer != h:
+            self.desynced = True
+        for k in [k for k in self.peer_hashes if k < tick - 3000]:
+            del self.peer_hashes[k]
 
     def get_input(self, tick):
         d = self.input_buf.pop(tick, None)
