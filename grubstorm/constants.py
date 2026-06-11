@@ -13,6 +13,7 @@ SIM_SUBSTEPS = 2                    # liquid/powder passes per frame (snappier f
 # --- Physics ---------------------------------------------------------------
 GRAVITY = 0.12                      # cells / tick^2 for entities
 MAX_WIND = 0.045                    # horizontal accel on wind-affected projectiles
+WIND_ACCEL = 0.012                  # per-tick wind acceleration on projectiles
 TERMINAL_VY = 4.0
 
 GRUB_RADIUS = 2.6

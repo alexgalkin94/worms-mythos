@@ -2,7 +2,7 @@
 import math
 
 from . import materials as M
-from .constants import GRAVITY, MAX_WIND, GRUB_RADIUS
+from .constants import GRAVITY, WIND_ACCEL, GRUB_RADIUS
 from .particles import KIND_MAT, KIND_SPARK, KIND_FX
 
 
@@ -68,7 +68,7 @@ class Projectile:
         in_liquid = w.is_liquid(self.x, self.y)
         g = GRAVITY * self.gravity * game.gravity_scale * w.gravity_dir
         self.vy += g
-        self.vx += game.wind * self.wind * MAX_WIND * 14
+        self.vx += game.wind * self.wind * WIND_ACCEL
         if in_liquid:
             self.vx *= self.drag_in_liquid
             self.vy *= self.drag_in_liquid
@@ -95,10 +95,15 @@ class Projectile:
         speed = math.hypot(self.vx, self.vy)
         steps = max(1, int(speed) + 1)
         sx, sy = self.vx / steps, self.vy / steps
+        # only direct-impact shells (rockets) and armed proximity charges
+        # detonate on touching a grub — grenades bounce off heads, as nature
+        # intended
+        contact_fused = self.bounce is None or \
+            (self.proximity is not None and self.age > self.arm_delay)
         for _ in range(steps):
             nx, ny = self.x + sx, self.y + sy
             # direct grub hit
-            if self.age > self.arm_delay or self.bounce is None:
+            if contact_fused and self.age > 3:
                 for gr in game.all_grubs():
                     if gr.alive and (gr is not self.owner or self.age > 30) and \
                             math.hypot(gr.x - nx, gr.y - ny) < GRUB_RADIUS + self.radius:
@@ -609,6 +614,12 @@ def fire_girder(game, grub, angle, power, click):
     if not click:
         return
     cx, cy = click
+    # classic rule: girders only reach so far from your grub
+    d = math.hypot(cx - grub.x, cy - grub.y)
+    if d > 85:
+        f = 85 / d
+        cx = grub.x + (cx - grub.x) * f
+        cy = grub.y + (cy - grub.y) * f
     w = game.world
     horizontal = abs(math.cos(angle)) > 0.5
     if horizontal:

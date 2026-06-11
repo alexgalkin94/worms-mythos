@@ -1,7 +1,20 @@
-"""CRT presentation: phosphor glow, bloom, slot mask, scanlines, vignette,
-chromatic fringe and gentle flicker — collapsed into as few full-screen
-operations as possible so the cabinet can run at high refresh rates.
-Everything is a slider in the options menu."""
+"""CRT presentation, modeled on how real tubes actually destroy pixel art
+in the best possible way:
+
+- the electron beam smears adjacent pixels into continuous color
+  (horizontal bilinear upscale instead of nearest — THE difference between
+  "modern TV" crispy squares and a real CRT photo)
+- the phosphor slot mask provides the fine structure the pixel grid used to
+- mask + scanlines are folded into ONE gamma-correct multiply overlay, so
+  dark lines don't crush overall brightness
+- halation: bright light scatters in the glass and fills the scanline gaps
+  around hot pixels (this also reads as brightness-dependent beam width)
+- phosphor persistence leaves faint trails on fast bright things
+- subtle barrel curvature, deconvergence fringe, vignette, glass shine,
+  and a gentle flicker
+
+Everything scales with the CRT/bloom sliders; CRT at 0 = clean pixels.
+"""
 import random
 
 import numpy as np
@@ -16,61 +29,107 @@ class CRT:
         self.scale = scale
         self.vw, self.vh = GRID_W * scale, GRID_H * scale
         self.big = pygame.Surface((self.vw, self.vh))
+        self._wide = pygame.Surface((self.vw, GRID_H))   # h-smeared, pre-rows
+        self._persist = pygame.Surface((GRID_W, GRID_H))
+        self._persist.fill((0, 0, 0))
         self._phosphor = None
         self._shine = None
         self._built_for = None
+        self._warp_x = self._warp_y = None
+        self._hal = pygame.Surface((self.vw, self.vh))
         self._build_overlays()
+        self._build_warp()
 
+    # ------------------------------------------------------------- overlays
     def _build_overlays(self):
         w, h, sc = self.vw, self.vh, self.scale
         crt = float(self.settings.get("crt", 0.8))
         self._built_for = crt
-        # slot mask + scanlines + vignette in ONE multiply overlay
-        col = np.full((w, h, 3), 255.0, np.float32)
+        # linear-light multipliers for slot mask + scanlines + vignette
+        m = np.ones((w, h), np.float32)
         xs = np.arange(w)
-        for lane, (a, b) in enumerate(((1, 2), (0, 2), (0, 1))):
-            sel = xs % 3 == lane
-            col[sel, :, a] -= 13
-            col[sel, :, b] -= 16
         ys = np.arange(h)
-        col[:, ys % sc == 0, :] -= 40
+        # slot mask: RGB lanes with staggered horizontal slot gaps
+        lane = xs % 3
+        slot_h = sc * 2                       # slot height in screen pixels
+        stagger = ((xs // 3) % 2) * (slot_h // 2)
+        slot_row = (ys[None, :] + stagger[:, None]) % slot_h
+        gap = slot_row == slot_h - 1
+        m[gap] *= 0.78
+        # scanlines: one darker row per source row, one slightly dim
+        m[:, ys % sc == 0] *= 0.55
         if sc >= 3:
-            col[:, ys % sc == 1, :] -= 12
-        # intensity: lerp the mask toward plain white
-        col = 255.0 - (255.0 - col) * min(1.0, crt * 1.2)
-        # vignette is multiplicative darkening — fold it into the same overlay
+            m[:, ys % sc == 1] *= 0.88
+        # per-channel lane attenuation (phosphor triads)
+        col = np.empty((w, h, 3), np.float32)
+        col[:] = m[:, :, None]
+        for ch in range(3):
+            col[lane != ch, :, ch] *= 0.72
+        # vignette = multiplicative corner darkening
         nx = (xs / (w - 1))[:, None] * 2 - 1
         ny = (ys / (h - 1))[None, :] * 2 - 1
         d = np.sqrt(nx * nx * 1.05 + ny * ny * 0.95)
-        vig = np.clip((d - 0.72) * 2.0, 0, 1) ** 1.6 * \
-            (0.55 * min(1.0, crt + 0.15))
-        col *= (1.0 - vig)[:, :, None]
-        col[:4, :, :] *= 0.65
-        col[-4:, :, :] *= 0.65
-        col[:, :4, :] *= 0.65
-        col[:, -4:, :] *= 0.65
+        vig = 1.0 - np.clip((d - 0.78) * 1.9, 0, 1) ** 1.7 * 0.5
+        col *= vig[:, :, None]
+        # rounded-corner cut
+        cx = np.minimum(xs, w - 1 - xs)[:, None]
+        cy = np.minimum(ys, h - 1 - ys)[None, :]
+        rad = 0.018 * w
+        corner = np.clip((cx + cy + 2 - rad) / rad * 2.5, 0, 1)
+        col *= corner[:, :, None]
+        # intensity slider: lerp the whole treatment toward plain white
+        amt = min(1.0, crt * 1.15)
+        col = 1.0 - (1.0 - col) * amt
+        # gamma-correct: a CRT multiplies light, not sRGB values. Encoding
+        # the multipliers with 1/2.2 keeps perceived brightness intact.
+        col = np.power(np.clip(col, 0.0, 1.0), 1.0 / 2.2) * 255.0
         surf = pygame.Surface((w, h))
         pygame.surfarray.blit_array(surf, col.astype(np.uint8))
         self._phosphor = surf
         # curved-glass shine: one faint additive ellipse, prerendered
         shine = pygame.Surface((w, h))
-        pygame.draw.ellipse(shine, (int(10 * crt),) * 3,
+        pygame.draw.ellipse(shine, (int(9 * crt),) * 3,
                             (-w * 0.2, -h * 0.75, w * 1.4, h * 1.1))
         self._shine = shine
 
+    def _build_warp(self):
+        """Precomputed barrel-distortion gather indices at view res."""
+        k = 0.025
+        ys, xs = np.mgrid[0:GRID_H, 0:GRID_W].astype(np.float32)
+        nx = xs / (GRID_W - 1) * 2 - 1
+        ny = ys / (GRID_H - 1) * 2 - 1
+        r2 = nx * nx + ny * ny
+        f = 1.0 + k * r2
+        wx = ((nx * f) + 1) * 0.5 * (GRID_W - 1)
+        wy = ((ny * f) + 1) * 0.5 * (GRID_H - 1)
+        self._warp_x = np.clip(wx.round(), 0, GRID_W - 1).astype(np.int32).T
+        self._warp_y = np.clip(wy.round(), 0, GRID_H - 1).astype(np.int32).T
+
+    # -------------------------------------------------------------- present
     def present(self, view, screen):
         s = self.settings
         crt = float(s.get("crt", 0.8))
         if abs(crt - self._built_for) > 0.02:
             self._build_overlays()
-        # chromatic fringe at grid res (cheap, reads right after upscale)
+        bloom_amt = float(s.get("bloom", 0.7))
+
+        # phosphor persistence: faint exponential trails on bright movement
+        if crt > 0.45 and not s.get("reduce_flash"):
+            self._persist.fill((168, 172, 178),
+                               special_flags=pygame.BLEND_RGB_MULT)
+            view.blit(self._persist, (0, 0),
+                      special_flags=pygame.BLEND_RGB_MAX)
+            self._persist.blit(view, (0, 0))
+
+        # deconvergence: red and blue beams land a hair apart
         if crt > 0.25 and s.get("aberration", True):
             arr = pygame.surfarray.pixels3d(view)
             arr[1:, :, 0] = arr[:-1, :, 0]
             arr[:-1, :, 2] = arr[1:, :, 2]
             del arr
-        # bloom: bright-pass at low res, blurred, added before upscale
-        bloom_amt = float(s.get("bloom", 0.7))
+
+        # bright-pass for bloom + halation, at low res
+        blo = None
         if bloom_amt > 0.05:
             q = pygame.transform.smoothscale(view, (GRID_W // 4, GRID_H // 4))
             qa = pygame.surfarray.pixels3d(q)
@@ -82,18 +141,38 @@ class CRT:
             del qa
             q = pygame.transform.smoothscale(q, (GRID_W // 8, GRID_H // 8))
             blo = pygame.transform.smoothscale(q, (GRID_W, GRID_H))
-            blo.set_alpha(int(170 * bloom_amt))
+            blo.set_alpha(int(150 * bloom_amt))
             view.blit(blo, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
-        pygame.transform.scale(view, (self.vw, self.vh), self.big)
+
+        # barrel curvature: real per-pixel remap, opt-in (costs ~2.5 ms)
+        if crt > 0.3 and s.get("curvature"):
+            arr = pygame.surfarray.pixels3d(view)
+            arr[:] = arr[self._warp_x, self._warp_y]
+            del arr
+
+        # THE pixel-melt: the beam spot blends neighbouring pixels
+        # horizontally; scanline structure keeps the vertical definition
         big = self.big
+        if crt > 0.2:
+            pygame.transform.smoothscale(view, (self.vw, GRID_H), self._wide)
+            pygame.transform.scale(self._wide, (self.vw, self.vh), big)
+        else:
+            pygame.transform.scale(view, (self.vw, self.vh), big)
+
         if crt > 0.05:
             big.blit(self._phosphor, (0, 0),
                      special_flags=pygame.BLEND_RGB_MULT)
+            # halation: glass-scattered light fills the scanline gaps around
+            # bright areas (reads as the beam widening on hot pixels)
+            if blo is not None and crt > 0.3:
+                pygame.transform.scale(blo, (self.vw, self.vh), self._hal)
+                self._hal.set_alpha(int(60 + 70 * bloom_amt))
+                big.blit(self._hal, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
             if crt > 0.5:
                 big.blit(self._shine, (0, 0),
                          special_flags=pygame.BLEND_RGB_ADD)
             if not s.get("reduce_flash") and crt > 0.4:
-                d = 247 + random.randint(0, 8)
+                d = 248 + random.randint(0, 7)
                 big.fill((d, d, d), special_flags=pygame.BLEND_RGB_MULT)
         sw, sh = screen.get_size()
         if (sw, sh) != (self.vw, self.vh):

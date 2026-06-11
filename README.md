@@ -117,12 +117,26 @@ window size (Options → Window size) buys more headroom on weak machines.
 
 ## Presentation
 
-Everything renders into a 480×270 cell grid and goes through a CRT pipeline:
-emissive materials (lava, fire, acid, crystals, magic) light up the dark,
-bright pixels bloom through a low-res bright-pass, then slot mask, scanlines,
-chromatic fringe, smooth vignette, glass shine and a gentle flicker. All of
-it on sliders in Options, including a reduced-flashing mode and
-colorblind-friendly team palettes.
+Everything renders into a 480×270 cell grid and goes through a CRT pipeline
+modeled on how real tubes actually display pixel art — the pixels melt:
+
+![modern vs crt](docs/crt_comparison.png)
+
+- the beam smears neighbouring pixels into continuous color (horizontal
+  bilinear pass); the phosphor slot mask provides the fine structure the
+  pixel grid used to
+- mask + scanlines + vignette are one gamma-correct multiply, so dark lines
+  don't crush brightness
+- halation: bright light scatters in the glass and fills scanline gaps
+  around hot pixels
+- phosphor persistence leaves faint trails on fast bright things, plus
+  deconvergence fringe, glass shine, gentle flicker, and opt-in true barrel
+  curvature
+- emissive materials (lava, fire, acid, crystals, magic) light up dark
+  caves, and bright pixels bloom
+
+All of it on sliders/toggles in Options (CRT at 0 = clean pixels), with a
+reduced-flashing mode and colorblind-friendly team palettes.
 
 ## Repository layout
 

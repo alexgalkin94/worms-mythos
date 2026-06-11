@@ -47,6 +47,7 @@ class MapSpec:
         self.spawns = kw.get("spawns", [])
         self.decor = kw.get("decor", "stars")          # bg particle theme
         self.light = kw.get("light", 1.0)              # ambient light level
+        self.open_sky = kw.get("open_sky", True)       # airstrikes possible?
 
 
 BIOMES = [
@@ -239,7 +240,7 @@ def _gen_sewer(world, rng):
     _ocean(world, 12, M.ACID)
     return MapSpec("sewer", world, sky_top=(10, 18, 12),
                    sky_bottom=(28, 48, 30), ambient=18, flood_mat=M.ACID,
-                   decor="drips", light=0.6)
+                   decor="drips", light=0.6, open_sky=False)
 
 
 def _gen_tundra(world, rng):
@@ -293,7 +294,7 @@ def _gen_cavern(world, rng):
     _ocean(world, 10)
     return MapSpec("cavern", world, sky_top=(8, 6, 16),
                    sky_bottom=(20, 14, 40), ambient=14, decor="spores",
-                   light=0.45)
+                   light=0.45, open_sky=False)
 
 
 def _gen_junkyard(world, rng):
@@ -346,7 +347,7 @@ def _gen_mine(world, rng):
     _ocean(world, 10)
     return MapSpec("mine", world, sky_top=(14, 10, 8),
                    sky_bottom=(50, 36, 24), ambient=18, decor="dust",
-                   light=0.5)
+                   light=0.5, open_sky=False)
 
 
 def _gen_lab(world, rng):
@@ -374,7 +375,7 @@ def _gen_lab(world, rng):
     world.mat[-1, :] = M.BEDROCK
     return MapSpec("lab", world, sky_top=(18, 22, 30),
                    sky_bottom=(40, 50, 70), ambient=20, decor="sparks",
-                   light=0.75)
+                   light=0.75, open_sky=False)
 
 
 def _gen_candy(world, rng):

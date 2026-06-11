@@ -139,12 +139,15 @@ class Game:
         spawn_iter = list(self.spec.spawns)
         self.rng.shuffle(spawn_iter)
         ni = 0
+        sky_weapons = [i for i, w in enumerate(WEAPONS)
+                       if w.key in ("airstrike", "napalm", "lightning")]
         for tc in settings["teams"]:
             team = Team(tc["name"], tc["color_idx"], tc.get("control", "local"),
                         tc.get("n_grubs", 4))
             team.ammo = default_ammo(settings)
-            if settings.get("one_shot"):
-                pass
+            if not self.spec.open_sky:
+                for wi in sky_weapons:    # no sky under a cave ceiling
+                    team.ammo[wi] = 0
             for _ in range(team.n_grubs):
                 if spawn_iter:
                     sx, sy = spawn_iter.pop()
@@ -169,6 +172,7 @@ class Game:
         self.charging = False
         self.shots_left = 1
         self.fired_this_turn = False
+        self._shots_fired = 0
         self.wind = 0.0
         self._roll_wind()
         self.sudden_death = False
@@ -232,9 +236,7 @@ class Game:
             blast = r * 2.2
             if d < blast:
                 f = max(0.0, 1 - d / blast)
-                dmg = power * f * (0.8 if self.settings.get("one_shot") is None else 0.8)
-                if self.settings.get("one_shot"):
-                    dmg = 999
+                dmg = 999 if self.settings.get("one_shot") else power * f * 0.8
                 pre = g.alive
                 g.hurt(dmg, self)
                 if attacker is not None and g.team != self.turn_team:
@@ -340,6 +342,7 @@ class Game:
         self.charging = False
         self.shots_left = 1
         self.fired_this_turn = False
+        self._shots_fired = 0
         self._roll_wind()
         if not WEAPONS[self.weapon].ends_turn or \
                 self.current_team().ammo.get(self.weapon, 0) == 0:
@@ -383,8 +386,19 @@ class Game:
         if self.rng.random() < chance:
             kind = self.rng.choices(["weapon", "health", "trap"],
                                     weights=[55, 30, 15])[0]
-            self.crates.append(Crate(self.rng.randint(20, self.world.w - 20),
-                                     kind))
+            if self.spec.open_sky:
+                crate = Crate(self.rng.randint(20, self.world.w - 20), kind)
+            else:
+                # cave maps: drop the crate just above a walkable spot so it
+                # doesn't land on the ceiling, unreachable forever
+                if self.spec.spawns:
+                    cx, cy = self.rng.choice(self.spec.spawns)
+                else:
+                    cx, cy = self.world.w // 2, 30
+                crate = Crate(cx, kind)
+                crate.y = float(cy - 10)
+            self.crates.append(crate)
+            self.fx_event("crate", crate.x, max(0, crate.y), 1)
         # reset per-turn bookkeeping
         for g in self.all_grubs():
             g.damage_taken_turn = 0.0
@@ -446,8 +460,10 @@ class Game:
                 self.phase = Game.PH_ACTIVE
         elif self.phase == Game.PH_ACTIVE:
             self.turn_timer -= 1
+            # classic rule: taking real damage ends your turn (the small
+            # threshold lets you survive a lick of flame without losing it)
             if active is None or not active.alive or self.turn_timer <= 0 or \
-                    active.flying and active.damage_taken_turn > 0:
+                    active.damage_taken_turn > 6:
                 self._begin_resolve()
         elif self.phase == Game.PH_RETREAT:
             self.phase_t -= 1
@@ -529,14 +545,15 @@ class Game:
         spec.fire_fn(self, g, angle, power, click)
         self._homing_target = None
         self.fx_event("fire_" + spec.key, g.x, g.y, 1)
+        # switching the jetpack OFF refunds nothing because it costs nothing
+        if spec.key == "jetpack" and not g.jetpack:
+            return
         if team.ammo.get(self.weapon, 0) > 0:
             team.ammo[self.weapon] -= 1
         if spec.ends_turn:
             self.fired_this_turn = True
             # multi-shot weapons keep the turn until shots run out
             if spec.shots > 1:
-                if not hasattr(self, "_shots_fired"):
-                    self._shots_fired = 0
                 self._shots_fired += 1
                 if self._shots_fired < spec.shots:
                     return

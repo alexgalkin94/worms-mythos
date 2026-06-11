@@ -5,7 +5,7 @@ online play every client computes identical bot behaviour locally.
 """
 import math
 
-from .constants import GRAVITY, MAX_WIND
+from .constants import GRAVITY, WIND_ACCEL
 from .game import Game, InputFrame
 from .weapons import WEAPONS, W_BY_KEY
 
@@ -33,7 +33,7 @@ def _simulate_shot(game, x0, y0, angle, power, wind_affected, owner):
     for _ in range(400):
         vy += GRAVITY * game.gravity_scale
         if wind_affected:
-            vx += game.wind * MAX_WIND * 14
+            vx += game.wind * WIND_ACCEL
         sp = math.hypot(vx, vy)
         steps = max(1, int(sp) + 1)
         for _ in range(steps):

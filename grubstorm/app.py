@@ -26,7 +26,7 @@ DEFAULT_SETTINGS = {
     "crt": 0.8, "bloom": 0.7, "shake": 1.0, "volume": 0.8,
     "reduce_flash": False, "colorblind": False, "aberration": True,
     "fullscreen": False, "server": "127.0.0.1:31999", "player_name": "Grub",
-    "fps_cap": 144, "show_fps": False, "render_scale": 3,
+    "fps_cap": 144, "show_fps": False, "render_scale": 3, "curvature": False,
 }
 
 FPS_CAPS = [60, 120, 144, 240, 0]          # 0 = uncapped
@@ -153,7 +153,7 @@ class LocalSetup(Screen):
         self.biomes = list(BIOMES) + sandbox_mod.list_custom_maps()
         self.mods = {"low_gravity": False, "one_shot": False,
                      "random_weapons": False, "crate_madness": False,
-                     "all_super": False}
+                     "all_super": False, "hurricane": False}
         self.turn_seconds = TURN_SECONDS
         self.sd_minutes = 8
 
@@ -209,7 +209,8 @@ class LocalSetup(Screen):
         labels = {"low_gravity": "Low gravity", "one_shot": "One-shot kills",
                   "random_weapons": "Random weapons",
                   "crate_madness": "Crate madness",
-                  "all_super": "All super weapons"}
+                  "all_super": "All super weapons",
+                  "hurricane": "Hurricane winds"}
         for k, lab in labels.items():
             self.mods[k] = ui.toggle(view, (bx, my, 130, 13), lab, self.mods[k])
             my += 15
@@ -230,13 +231,16 @@ class LocalSetup(Screen):
         self.biome_i = (self.biome_i + d) % len(self.biomes)
 
     def start(self):
+        mods = dict(self.mods)
+        hurricane = mods.pop("hurricane")
         settings = {
             "seed": random.randint(0, 10 ** 9),
             "biome": self.biomes[self.biome_i],
             "teams": [dict(t) for t in self.teams],
             "turn_seconds": self.turn_seconds,
             "sudden_death_at": self.sd_minutes * 60,
-            **self.mods,
+            "wind_scale": 2.2 if hurricane else 1.0,
+            **mods,
         }
         self.app.goto(GameScreen(self.app, settings))
 
@@ -493,8 +497,10 @@ class OptionsScreen(Screen):
         s["colorblind"] = ui.toggle(view, (x, y, w, 14),
                                     "Colorblind team colors", s["colorblind"])
         y += 18
-        s["aberration"] = ui.toggle(view, (x, y, w, 14),
-                                    "Chromatic fringe", s["aberration"])
+        s["aberration"] = ui.toggle(view, (x, y, w // 2 - 4, 14),
+                                    "Color fringe", s["aberration"])
+        s["curvature"] = ui.toggle(view, (x + w // 2 + 4, y, w // 2 - 4, 14),
+                                   "Curvature", s["curvature"])
         y += 18
         fs = ui.toggle(view, (x, y, w, 14), "Fullscreen", s["fullscreen"])
         if fs != s["fullscreen"]:
