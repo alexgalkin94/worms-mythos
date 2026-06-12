@@ -39,6 +39,7 @@ class LabRig:
         self.fx = []
         self.focus = (0, 0)
         self.active_grub = None
+        self.tick = 0           # bodies poll game.tick for their rest checks
 
     # --- Game API used by weapons/grubs ---
     def all_grubs(self):
@@ -108,6 +109,7 @@ class LabRig:
         """Tick as a generator (see World.step_slices): the sandbox spends
         a per-frame time budget on slices, so one heavy tick spreads over
         several rendered frames instead of freezing one."""
+        self.tick += 1
         self.bodies = [b for b in self.bodies if b.update(self)]
         yield from self.world.step_slices()
         self.particles.step(self.world)
