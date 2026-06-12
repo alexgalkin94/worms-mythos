@@ -9,6 +9,11 @@ import numpy as np
 from . import materials as M
 from .constants import GRID_W, GRID_H, SIM_SUBSTEPS
 
+# pre-thresholded gather table: a bool take is ~3x cheaper than a float
+# take followed by a full-plane compare, and the movement passes only ever
+# need the yes/no answer
+FLAM_ANY = M.FLAMMABLE > 0
+
 
 def nz2(mask):
     """(ys, xs) of a 2-D bool mask. flatnonzero + divmod takes numpy's
@@ -20,13 +25,22 @@ def nz2(mask):
 
 def shift(a, dy, dx, fill):
     """out[y, x] = a[y + dy, x + dx], edges filled with `fill`."""
-    out = np.full_like(a, fill)
-    h, w = a.shape[0], a.shape[1]
+    # empty + edge-band fill: full_like pre-painted the whole plane only
+    # for the shifted copy to overwrite all but the bands
+    out = np.empty_like(a)
     sy = slice(dy, None) if dy >= 0 else slice(None, dy)
     oy = slice(None, -dy if dy > 0 else None) if dy >= 0 else slice(-dy, None)
     sx = slice(dx, None) if dx >= 0 else slice(None, dx)
     ox = slice(None, -dx if dx > 0 else None) if dx >= 0 else slice(-dx, None)
     out[oy, ox] = a[sy, sx]
+    if dy > 0:
+        out[-dy:] = fill
+    elif dy < 0:
+        out[:-dy] = fill
+    if dx > 0:
+        out[:, -dx:] = fill
+    elif dx < 0:
+        out[:, :-dx] = fill
     return out
 
 
@@ -51,7 +65,10 @@ class World:
         self.head = np.full((h, w), 0xFFFFFFFF, np.uint32)  # (y<<9|x) of
         # the highest connected surface: pressure head AND component id
         self.temp = np.full((h, w), 20.0, np.float32)
-        self.moved = np.zeros((h, w), np.uint8)
+        # fused "phase unless moved this substep" plane: holds the phase
+        # value, forced to 255 once a cell moves — the ubiquitous
+        # (phase == X) & (moved == 0) test collapses to one compare
+        self.phm = np.zeros((h, w), np.uint8)
         self.tick = 0
         self.wind = 0.0
         self.ambient = 20.0
@@ -80,6 +97,19 @@ class World:
         self.render_dirty: list[int] | None = [0, h, 0, w]
         self.last_region = None
         self._ry0 = self._rx0 = 0
+        self._bind_flats()
+
+    def _bind_flats(self):
+        """1-D views of the swap planes for _apply_moves. Pure views into
+        the same buffers — must be re-bound whenever the arrays are
+        replaced wholesale (from_bytes)."""
+        self._flat7 = (self.mat.reshape(-1), self.shade.reshape(-1),
+                       self.life.reshape(-1), self.burn.reshape(-1),
+                       self.temp.reshape(-1), self.phase.reshape(-1),
+                       self.dens.reshape(-1))
+        self._flat8 = self._flat7 + (self.rest.reshape(-1),)
+        self._flat_rest = self.rest.reshape(-1)
+        self._flat_phm = self.phm.reshape(-1)
 
     # ------------------------------------------------------------- helpers
     def in_bounds(self, x, y):
@@ -192,46 +222,56 @@ class World:
         x0 = int(cols.argmax()); x1 = len(cols) - int(cols[::-1].argmax())
         self.wake(ox + x0, oy + y0, ox + x1 - 1, oy + y1 - 1)
 
-    def _apply_moves(self, mask, dy, dx, reset_rest=True, keep_awake=True):
-        # clip to the mask's bounding rows first: the full-region nonzero
-        # scan dominated profiles when a big region had one small active
-        # spot (and most rule masks are empty or tiny)
-        rows = mask.any(1)
-        if not rows.any():
-            return 0
-        r0 = int(rows.argmax())
-        r1 = len(rows) - int(rows[::-1].argmax())
-        # flatnonzero + divmod is ~7x faster than 2-D nonzero (one output
-        # pass, no per-element coordinate writes), same indices
-        idx = np.flatnonzero(mask[r0:r1])
+    def _apply_moves(self, mask, dy, dx, reset_rest=True, keep_awake=True,
+                     idx=None):
+        # one flatnonzero over the whole mask replaces the old any(1) +
+        # banded rescan: nonzero's counting pass costs about what the row
+        # scan did, and empty/sparse masks (the common case) exit cheaper.
+        # Rules that already hold flat candidate indices pass idx directly.
+        if idx is None:
+            idx = np.flatnonzero(mask)
         n = len(idx)
-        ys, xs = np.divmod(idx, mask.shape[1])
-        ys += r0
+        if n == 0:
+            return 0
         # swap through FLAT indices into the contiguous base planes: the
         # source/target index arithmetic happens once instead of inside
         # every per-plane 2-D fancy index, and 1-D gathers take numpy's
         # fast path. Same cells, same values — bit-identical.
+        wm = mask.shape[1]
         wf = self.mat.shape[1]
-        fs = (ys + self._ry0) * wf + (xs + self._rx0)
+        # idx is sorted, so the y extent falls out of its ends for free
+        r0 = int(idx[0]) // wm
+        r1 = int(idx[-1]) // wm + 1
+        if wm == wf and self._rx0 == 0:
+            # full-width region: the flat index IS the plane index (plus a
+            # row offset), so the divmod can be skipped entirely; xs is
+            # still needed for the wake bounds below
+            xs = idx % wm
+            fs = idx + self._ry0 * wf
+        else:
+            ys, xs = np.divmod(idx, wm)
+            fs = (ys + self._ry0) * wf + (xs + self._rx0)
         fd = fs + (dy * wf + dx)
-        for a in (self.mat, self.shade, self.life, self.burn,
-                  self.temp, self.phase, self.dens, self.rest):
-            ar = a.reshape(-1)
+        # the rest plane is excluded from the swap when reset_rest: both
+        # ends get forced to 0 right after, so swapping it first is dead
+        # work (same final plane either way)
+        planes = self._flat7 if reset_rest else self._flat8
+        for ar in planes:
             tmp = ar[fd]                 # fancy gather already copies
             ar[fd] = ar[fs]
             ar[fs] = tmp
-        mr = self.moved.reshape(-1)
-        mr[fs] = 1
-        mr[fd] = 1
+        pmr = self._flat_phm
+        pmr[fs] = 255
+        pmr[fd] = 255
         if reset_rest:
             # gravity-driven motion is "real" flow and wakes the cell;
             # flat lateral wandering carries its rest along and ages out
-            rr = self.rest.reshape(-1)
+            rr = self._flat_rest
             rr[fs] = 0
             rr[fd] = 0
         oy, ox = self._ry0, self._rx0
-        x0 = ox + int(xs.min()) - 1; y0 = oy + int(ys.min()) - 1
-        x1 = ox + int(xs.max()) + 1; y1 = oy + int(ys.max()) + 1
+        x0 = ox + int(xs.min()) - 1; y0 = oy + r0 - 1
+        x1 = ox + int(xs.max()) + 1; y1 = oy + r1
         if keep_awake:
             self.wake(x0, y0, x1, y1)
         else:
@@ -251,12 +291,23 @@ class World:
     @staticmethod
     def _bshift(a, dy, dx):
         """Boolean/int shift with False fill: out[y,x] = a[y+dy, x+dx]."""
-        out = np.zeros_like(a)
+        # empty + explicit edge-band fill: zeros_like was over half this
+        # function's cost, zeroing the whole plane to then overwrite most
+        # of it with the shifted copy
+        out = np.empty_like(a)
         sy = slice(dy, None) if dy >= 0 else slice(None, dy)
         oy = slice(None, -dy if dy > 0 else None) if dy >= 0 else slice(-dy, None)
         sx = slice(dx, None) if dx >= 0 else slice(None, dx)
         ox = slice(None, -dx if dx > 0 else None) if dx >= 0 else slice(-dx, None)
         out[oy, ox] = a[sy, sx]
+        if dy > 0:
+            out[-dy:] = 0
+        elif dy < 0:
+            out[:-dy] = 0
+        if dx > 0:
+            out[:, -dx:] = 0
+        elif dx < 0:
+            out[:, :-dx] = 0
         return out
 
     def _powder_pass(self, parity, lateral=True):
@@ -283,10 +334,21 @@ class World:
             powder = ph == M.P_POWDER
             free = ph <= M.P_GAS
             diag = self._bshift(free, g, dd) & self._bshift(free, 0, dd)
+            # CLUMPY/SLIDE gates evaluated per CANDIDATE: only pile surfaces
+            # have a free diagonal, so gathering those few cells beats two
+            # full-plane table takes plus a float compare (rnd is the
+            # pre-drawn field either way — same values, same mask)
+            pre = powder & diag
+            idx = np.flatnonzero(pre)
+            if len(idx) == 0:
+                continue
             steep = self._bshift(free, 2 * g, dd)
-            ok = powder & diag & (steep | ~np.take(M.CLUMPY, self.v_mat)) \
-                & (rnd < np.take(M.SLIDE, self.v_mat))
-            n += self._apply_moves(ok, g, dd)
+            yc, xc = np.divmod(idx, pre.shape[1])
+            mc = self.v_mat[yc, xc]
+            okv = (steep[yc, xc] | ~M.CLUMPY[mc]) & (rnd[yc, xc] < M.SLIDE[mc])
+            # idx is sorted and okv filters in order — exactly the indices
+            # a flatnonzero over the scattered mask would yield
+            n += self._apply_moves(pre, g, dd, idx=idx[okv])
         return n
 
     def _mark_level_work(self, real_work):
@@ -326,6 +388,14 @@ class World:
             dribble = near_wall & (rnd < stickv * 0.55)
         else:
             cling = dribble = np.zeros_like(liq)
+        # rnd and visc are fixed for the whole pass (visc is deliberately a
+        # snapshot — moves don't refresh it), so every viscosity roll and
+        # the cling complement can be taken once instead of per direction
+        not_cling = ~cling
+        fastr = rnd > visc
+        fast2 = rnd > visc * 0.5
+        r_lo = rnd < 0.5
+        r_hi = rnd >= 0.5
         n = 0
         real_work = np.zeros_like(liq)
         d = 1 if parity else -1
@@ -339,11 +409,13 @@ class World:
                    + self._ry0)[:, None]
             deepv = liq & ((self.v_head >> 9).astype(np.int32) <= yyv - 2)
             if deepv.any():
+                # deepv, cling and the viscosity roll never change inside
+                # the loop — fold them once
+                deepv_ok = deepv & not_cling & fastr
                 for dd in (d, -d):
                     ph = self.v_phase
-                    liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
-                    fl0 = liq2 & deepv & ~cling & \
-                        self._bshift(ph <= M.P_GAS, 0, dd) & (rnd > visc)
+                    liq2 = self.v_phm == M.P_LIQUID
+                    fl0 = liq2 & deepv_ok & self._bshift(ph <= M.P_GAS, 0, dd)
                     real_work |= fl0
                     n += self._apply_moves(fl0, 0, dd)
         ph = self.v_phase
@@ -353,21 +425,21 @@ class World:
         below_liq = self._bshift(ph, g, 0) == M.P_LIQUID
         below_dens = self._bshift(dens, g, 0)
         sink = below_liq & (dens > below_dens) & (rnd < 0.4)
-        fall = liq & (self.v_moved == 0) & below_free & ~dribble
+        not_dribble = ~dribble
+        fall = (self.v_phm == M.P_LIQUID) & below_free & not_dribble
         n += self._apply_moves(fall, g, 0)
         real_work |= fall               # gravity-driven moves, for levelling
         # density layering swaps are NOT "real work" for the levelling
         # window below — oil shuffling on the ocean would hold it open
         # forever while creep re-mixes what sinking un-mixes
-        n_sink = self._apply_moves(liq & sink & ~below_free & ~dribble, g, 0)
+        n_sink = self._apply_moves(liq & sink & ~below_free & not_dribble, g, 0)
         d = 1 if parity else -1
         # diagonal slump runs every substep; everything below is lateral
         for dd in (d, -d):
             ph = self.v_phase
             liq = ph == M.P_LIQUID
             free = ph <= M.P_GAS
-            ok = liq & self._bshift(free, g, dd) & ~cling & \
-                (rnd > visc * 0.5)
+            ok = liq & self._bshift(free, g, dd) & not_cling & fast2
             real_work |= ok
             n += self._apply_moves(ok, g, dd)
         if not lateral:
@@ -432,13 +504,16 @@ class World:
             fre = phe <= M.P_GAS
             sfe = lqe & shift(fre, -1, 0, ey0 == 0)
             ids = self._ids_plane[ey0:ey1, ex0:ex1]
-            np.minimum(hde, np.where(sfe, ids, BIG), out=hde)
+            # sfe ? ids : BIG without np.where: bool-1 wraps to all-ones at
+            # non-surface cells and ORs the id up to BIG
+            np.minimum(hde, ids | (sfe.astype(np.uint32) - np.uint32(1)),
+                       out=hde)
             blocked = ~lqe
             # barrier plane: OR with all-ones forces BIG on blocked cells,
             # OR with 0 is identity — one pure vector op instead of a
-            # boolean fancy-assignment (which was ~6x slower per sweep)
-            barrier = blocked.astype(np.uint32)
-            barrier *= np.uint32(BIG)
+            # boolean fancy-assignment (which was ~6x slower per sweep).
+            # -bool gives exactly 0/0xFFFFFFFF, ~10x cheaper than np.where
+            barrier = -(blocked.astype(np.uint32))
             np.bitwise_or(hde, barrier, out=hde)
             # in-place slice minimums (no shift allocations); the barrier
             # reset after EVERY direction is load-bearing — without it the
@@ -449,15 +524,28 @@ class World:
             # the lines warm at a fraction of the cost
             hot = self.tick < self.level_until
             if hot or self.tick % 2 == 0:
-                for _ in range(5 if hot else 2):
-                    np.minimum(hde[1:], hde[:-1], out=hde[1:])
-                    np.bitwise_or(hde, barrier, out=hde)
-                    np.minimum(hde[:-1], hde[1:], out=hde[:-1])
-                    np.bitwise_or(hde, barrier, out=hde)
-                    np.minimum(hde[:, 1:], hde[:, :-1], out=hde[:, 1:])
-                    np.bitwise_or(hde, barrier, out=hde)
-                    np.minimum(hde[:, :-1], hde[:, 1:], out=hde[:, :-1])
-                    np.bitwise_or(hde, barrier, out=hde)
+                # sweep only the liquid bounding box: every blocked cell is
+                # exactly BIG when each directional min starts (the OR right
+                # before re-pins it), so propagation can never cross the
+                # box edge and rows/columns without liquid are pure no-ops
+                lrows = lqe.any(1)
+                if lrows.any():
+                    lcols = lqe.any(0)
+                    by0 = int(lrows.argmax())
+                    by1 = len(lrows) - int(lrows[::-1].argmax())
+                    bx0 = int(lcols.argmax())
+                    bx1 = len(lcols) - int(lcols[::-1].argmax())
+                    hdw = hde[by0:by1, bx0:bx1]
+                    brw = barrier[by0:by1, bx0:bx1]
+                    for _ in range(5 if hot else 2):
+                        np.minimum(hdw[1:], hdw[:-1], out=hdw[1:])
+                        np.bitwise_or(hdw, brw, out=hdw)
+                        np.minimum(hdw[:-1], hdw[1:], out=hdw[:-1])
+                        np.bitwise_or(hdw, brw, out=hdw)
+                        np.minimum(hdw[:, 1:], hdw[:, :-1], out=hdw[:, 1:])
+                        np.bitwise_or(hdw, brw, out=hdw)
+                        np.minimum(hdw[:, :-1], hdw[:, 1:], out=hdw[:, :-1])
+                        np.bitwise_or(hdw, brw, out=hdw)
             # crop the extended window back to the region for the rules
             oy, ox = ry0 - ey0, rx0 - ex0
             hd = hde[oy:oy + (ry1 - ry0), ox:ox + (rx1 - rx0)]
@@ -467,18 +555,20 @@ class World:
             # two flow rounds per tick: pipe transport works by bubbles
             # walking backwards through the duct one cell per round, so
             # this directly doubles tunnel throughput
-            for _round in range(2):
-                round_n = 0
-                for dd in (d, -d):
-                    ph = self.v_phase
-                    liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
-                    flow = liq2 & deep & ~cling & \
-                        self._bshift(ph <= M.P_GAS, 0, dd) & (rnd > visc)
-                    real_work |= flow
-                    round_n += self._apply_moves(flow, 0, dd)
-                n += round_n
-                if not round_n:          # quiet round: round 2 won't differ
-                    break
+            deep_ok = deep & not_cling & fastr
+            if deep_ok.any():
+                for _round in range(2):
+                    round_n = 0
+                    for dd in (d, -d):
+                        ph = self.v_phase
+                        liq2 = self.v_phm == M.P_LIQUID
+                        flow = liq2 & deep_ok & \
+                            self._bshift(ph <= M.P_GAS, 0, dd)
+                        real_work |= flow
+                        round_n += self._apply_moves(flow, 0, dd)
+                    n += round_n
+                    if not round_n:      # quiet round: round 2 won't differ
+                        break
             # ---- pressure teleport (the Dwarf Fortress trick) ----------
             # Fluid under pressure doesn't crawl cell by cell: the top
             # cell of a body's HIGH surface jumps straight to the lowest
@@ -487,10 +577,9 @@ class World:
             # through walls), swaps conserve volume exactly, and a jump
             # only happens for a drop >= 2 — so equal pools are silent.
             # Deterministic: sorted matching, no probability gates.
-            ph = self.v_phase
-            liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
-            cand = liq2 & surfm & ~cling & \
-                (hd != np.uint32(0xFFFFFFFF)) & (rnd > visc)
+            liq2 = self.v_phm == M.P_LIQUID
+            cand = liq2 & surfm & not_cling & \
+                (hd != np.uint32(0xFFFFFFFF)) & fastr
             if cand.any():
                 cy, cx = nz2(cand)
                 cid = hd[cy, cx]
@@ -498,8 +587,12 @@ class World:
                 cy, cx, cid = cy[order], cx[order], cid[order]
                 starts = np.nonzero(np.r_[True, cid[1:] != cid[:-1]])[0]
                 ends = np.r_[starts[1:], len(cid)]
+                # most ids are singleton groups or flat (drop < 2): both
+                # produce nothing in the matcher, so filter them out before
+                # entering the Python loop (same groups, same order)
+                work = (ends - starts >= 2) & (cy[ends - 1] - cy[starts] >= 2)
                 src_y = []; src_x = []; dst_y = []; dst_x = []
-                for s, e in zip(starts, ends):
+                for s, e in zip(starts[work], ends[work]):
                     k = 0
                     lo, hi = s, e - 1
                     while lo < hi and k < 16:
@@ -517,8 +610,8 @@ class World:
                         tmp = a[ty_, tx_].copy()
                         a[ty_, tx_] = a[sy_, sx_]
                         a[sy_, sx_] = tmp
-                    self.v_moved[sy_, sx_] = 1
-                    self.v_moved[ty_, tx_] = 1
+                    self.v_phm[sy_, sx_] = 255
+                    self.v_phm[ty_, tx_] = 255
                     self.v_rest[sy_, sx_] = 0
                     self.v_rest[ty_, tx_] = 0
                     oy2, ox2 = self._ry0, self._rx0
@@ -537,10 +630,10 @@ class World:
         for dd in (d, -d):
             ph = self.v_phase
             free = ph <= M.P_GAS
-            liq = (ph == M.P_LIQUID) & (self.v_moved == 0) & ~cling
+            liq = (self.v_phm == M.P_LIQUID) & not_cling
             grounded = liq & ~self._bshift(free, g, 0)
-            side_free = self._bshift(free, 0, dd) & (rnd > visc) & \
-                ((rnd < 0.5) if dd == d else (rnd >= 0.5))
+            side_free = self._bshift(free, 0, dd) & fastr & \
+                (r_lo if dd == d else r_hi)
             pour = self._bshift(free, g, dd)
             pouring = grounded & side_free & pour
             if pouring.any():
@@ -552,7 +645,7 @@ class World:
             real_work |= pouring
             n += self._apply_moves(pouring, 0, dd)
             ph = self.v_phase
-            liq = (ph == M.P_LIQUID) & (self.v_moved == 0) & ~cling
+            liq = (self.v_phm == M.P_LIQUID) & not_cling
             grounded = liq & ~self._bshift(ph <= M.P_GAS, g, 0)
             flat = grounded & side_free & ~pour & \
                 (self.v_rest < self.REST_K)
@@ -585,12 +678,12 @@ class World:
             # destination: surface steps must be able to march across stone
             # blobs and ledges, or scattered rocks pin a tilted surface in
             # place forever (each one parking a step it can't cross)
-            surf = (ph == M.P_LIQUID) & (self.v_moved == 0) & ~cling & \
+            surf = (self.v_phm == M.P_LIQUID) & not_cling & \
                 ~self._bshift(free, g, 0) & \
                 self._bshift(free, -g, 0) & \
                 self._bshift(free, 0, dd) & \
                 ~self._bshift(free, g, dd) & \
-                (rnd > visc) & ((rnd < 0.5) if dd == d else (rnd >= 0.5))
+                fastr & (r_lo if dd == d else r_hi)
             slide = surf & self._bshift(free, g, 2 * dd)
             n += self._apply_moves(slide, 0, dd)
             if creep_on:
@@ -615,29 +708,32 @@ class World:
         # lingers a little before floating up
         is_fire = self.v_mat == M.FIRE
         if is_fire.any():
-            fuel_below = self._bshift(M.FLAMMABLE[self.v_mat] > 0,
+            fuel_below = self._bshift(np.take(FLAM_ANY, self.v_mat),
                                       self.gravity_dir, 0)
             stuck = is_fire & fuel_below
             gas = gas & ~stuck
         else:
             stuck = np.zeros_like(gas)
-        rise_p = np.where(is_fire, np.float32(0.45), np.float32(0.8))
-        n = self._apply_moves(gas & self._bshift(empty, g, 0) & (rnd < rise_p),
+        # rnd < (0.45 if fire else 0.8), spelled as scalar compares: 0.45
+        # implies 0.8, so the per-cell threshold select costs no np.where
+        rise = (rnd < np.float32(0.8)) & ((rnd < np.float32(0.45)) | ~is_fire)
+        n = self._apply_moves(gas & self._bshift(empty, g, 0) & rise,
                               g, 0)
         d = 1 if parity else -1
         if abs(self.wind) > 0.01:           # wind drifts gases
             d = 1 if self.wind > 0 else -1
         # like liquids, a cloud pinned under a ceiling calms down and rests:
         # diagonal rising is buoyancy (resets rest), sideways drift is not
+        not_stuck = ~stuck                  # fixed for the whole loop
         for dd in (d, -d):
             ph = self.v_phase
             awake = self.v_rest < self.REST_K
-            gas = (ph == M.P_GAS) & (self.v_moved == 0) & awake & ~stuck
+            gas = (self.v_phm == M.P_GAS) & awake & not_stuck
             empty = ph == M.P_EMPTY
             ok = gas & self._bshift(empty, g, dd) & (rnd < 0.6)
             n += self._apply_moves(ok, g, dd)
             ph = self.v_phase
-            gas = (ph == M.P_GAS) & (self.v_moved == 0) & awake & ~stuck
+            gas = (self.v_phm == M.P_GAS) & awake & not_stuck
             empty = ph == M.P_EMPTY
             ok = gas & self._bshift(empty, 0, dd) & \
                  ((rnd < 0.45) if dd == d else (rnd > 0.55))
@@ -1014,21 +1110,23 @@ class World:
             self.v_temp = self.temp[sy, sx]
             self.v_phase = self.phase[sy, sx]
             self.v_dens = self.dens[sy, sx]
-            self.v_moved = self.moved[sy, sx]
+            self.v_phm = self.phm[sy, sx]
             self.v_rnd = self.rng.random((y1 - y0, x1 - x0), dtype=np.float32)
             for s in range(SIM_SUBSTEPS):
-                self.v_moved[:] = 0
+                self.v_phm[...] = self.v_phase    # nothing moved yet
                 parity = (self.tick + s) % 2 == 0
                 moves += self._powder_pass(parity, lateral=(s == 0))
                 moves += self._liquid_pass(parity, lateral=(s == 0))
                 yield                     # slice boundary: one substep done
-            self.v_moved[:] = 0
+            self.v_phm[...] = self.v_phase
             moves += self._gas_pass(self.tick % 2 == 0)
-            # every fluid cell ages toward rest; real flow resets the clock
+            # every fluid cell ages toward rest; real flow resets the clock.
+            # P_GAS/P_LIQUID are 1/2, so one wrapping subtract covers both;
+            # adding the saturation mask as 0/1 beats a fancy-index +=
             ph = self.v_phase
-            fluid = (ph == M.P_LIQUID) | (ph == M.P_GAS)
+            fluid = (ph - np.uint8(1)) <= np.uint8(1)
             inc = fluid & (self.v_rest < 255)
-            self.v_rest[inc] += 1
+            self.v_rest += inc
             # reactions only happen where something is awake. During the
             # mapgen pre-settle the destructive chemistry pauses — fire,
             # acid and heat — so lava doesn't burn down the scenery before
@@ -1067,3 +1165,4 @@ class World:
         self.rest = np.frombuffer(raw[4*n:5*n], np.uint8).reshape(self.h, self.w).copy()
         self.head = np.frombuffer(raw[5*n:9*n], np.uint32).reshape(self.h, self.w).copy()
         self.temp = np.frombuffer(raw[9*n:13*n], np.float32).reshape(self.h, self.w).copy()
+        self._bind_flats()       # the planes above are fresh buffers
