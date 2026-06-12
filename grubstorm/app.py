@@ -1327,6 +1327,10 @@ class App:
                 mode = "GPU" if self.gpu_win is not None else "CPU"
                 txt = (f"{self.clock.get_fps():.0f} {mode} "
                        f"u{self._ms_u:.1f} d{self._ms_d:.1f} c{self._ms_c:.1f}")
+                if self.gpu_win is not None:
+                    # v ≈ 16.7 pinned means a driver/compositor still
+                    # forces vsync despite our hints
+                    txt += f" v{self.crt.present_block_ms:.1f}"
                 fps = self._fps_font.render(txt, True, (120, 255, 120))
                 fx = GRID_W - fps.get_width() - 2
                 fy = GRID_H - 12
