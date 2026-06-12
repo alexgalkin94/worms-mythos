@@ -372,18 +372,37 @@ class World:
             ry0, ry1, rx0, rx1 = self.last_region
             ey0, ey1 = max(0, ry0 - 1), min(self.h, ry1 + 1)
             ex0, ex1 = max(0, rx0 - 1), min(self.w, rx1 + 1)
+            # while work is in flight, the id solver runs on the SPAN of
+            # that work (level box), not just the wake region: after a
+            # surface migrates and its old id is invalidated, the fresh
+            # id must re-flood the whole connecting duct — which usually
+            # lies outside the small wake box around the teleport ends.
+            if self.tick < self.level_until and self.level_box:
+                lb = self.level_box
+                ey0 = min(ey0, max(0, lb[0]))
+                ey1 = max(ey1, min(self.h, lb[1] + 24))
+                ex0 = min(ex0, max(0, lb[2]))
+                ex1 = max(ex1, min(self.w, lb[3]))
             hde = self.head[ey0:ey1, ex0:ex1]
             BIG = np.uint32(0xFFFFFFFF)
             if self.tick % 64 == 0:
-                # rebuild kills stale pressure, but must SPARE the window
-                # border: that's where a sleeping reservoir's stored head
-                # leaks in, and wiping it would cut the only line to a
-                # pressure source outside the active region. The border
-                # ages by 1 instead, so true ghosts still fade away.
-                hde[1:-1, 1:-1] = BIG
-                for sl in (hde[0, :], hde[-1, :], hde[:, 0], hde[:, -1]):
-                    np.copyto(sl, sl + np.uint32(512),
-                              where=sl < BIG - np.uint32(512))
+                # VALIDITY rebuild instead of a wipe: an id names its
+                # source surface cell ((y<<9)|x) — kill only ids whose
+                # source is no longer a liquid surface (stale pressure
+                # ghosts). A wipe used to sever valid long-distance lines
+                # whenever the connecting duct lay outside the window,
+                # splitting one body into two 'individually level' halves
+                # that then slept with a 40-cell difference standing.
+                valid = hde != BIG
+                sy2 = np.clip((hde >> np.uint32(9)).astype(np.intp),
+                              0, self.h - 1)
+                sx2 = np.clip((hde & np.uint32(511)).astype(np.intp),
+                              0, self.w - 1)
+                liq_g = M.PHASE[self.mat] == M.P_LIQUID
+                airup = np.vstack([np.ones((1, self.w), bool),
+                                   M.PHASE[self.mat[:-1]] <= M.P_GAS])
+                surf_g = liq_g & airup
+                hde[~(surf_g[sy2, sx2] & valid)] = BIG
             phe = M.PHASE[self.mat[ey0:ey1, ex0:ex1]]
             lqe = phe == M.P_LIQUID
             fre = phe <= M.P_GAS
