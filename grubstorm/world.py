@@ -957,6 +957,15 @@ class World:
     REST_K = 30
 
     def step(self):
+        for _ in self.step_slices():
+            pass
+
+    def step_slices(self):
+        """The tick as a generator: yields between the heavy pass groups so
+        a frame-budgeted caller (the sandbox) can spread one expensive tick
+        across several rendered frames instead of stalling on it. step()
+        drains it in one go — the op sequence is identical either way, so
+        lockstep determinism is untouched."""
         self.tick += 1
         moves = 0
         # anti-stall: while the levelling window is open, re-pulse its box
@@ -1008,6 +1017,7 @@ class World:
                 parity = (self.tick + s) % 2 == 0
                 moves += self._powder_pass(parity, lateral=(s == 0))
                 moves += self._liquid_pass(parity, lateral=(s == 0))
+                yield                     # slice boundary: one substep done
             self.v_moved[:] = 0
             moves += self._gas_pass(self.tick % 2 == 0)
             # every fluid cell ages toward rest; real flow resets the clock
@@ -1020,6 +1030,7 @@ class World:
             # acid and heat — so lava doesn't burn down the scenery before
             # the players arrive. Gases still age out and water still
             # quenches lava, or the settle would never go quiet.
+            yield                         # slice boundary: movement done
             if not self.settle_mode:
                 if self.tick % 2 == 1:
                     self._fire_pass()    # 30 Hz is plenty for flames

@@ -2,6 +2,7 @@
 import os
 import math
 import random
+import time
 
 import numpy as np
 import pygame
@@ -100,8 +101,15 @@ class LabRig:
                           dmg=power * f * 0.5)
 
     def step(self, inp):
+        for _ in self.step_slices(inp):
+            pass
+
+    def step_slices(self, inp):
+        """Tick as a generator (see World.step_slices): the sandbox spends
+        a per-frame time budget on slices, so one heavy tick spreads over
+        several rendered frames instead of freezing one."""
         self.bodies = [b for b in self.bodies if b.update(self)]
-        self.world.step()
+        yield from self.world.step_slices()
         self.particles.step(self.world)
         self.projectiles = [p for p in self.projectiles if p.update(self)]
         self.entities = [e for e in self.entities if e.update(self)]
@@ -227,6 +235,8 @@ class SandboxScreen:
         class _LabSpec:
             light = 0.85
         self._spec = _LabSpec()
+        self._slices = None            # mid-tick generator, frame-budgeted
+        self._tick_debt = 0            # whole ticks owed to the slicer
 
     # ------------------------------------------------------------- actions
     def _flash(self, text, ttl=160):
@@ -339,6 +349,7 @@ class SandboxScreen:
                     f"playable from match setup!", 260)
 
     def _clear(self):
+        self._slices = None            # drop any mid-tick work
         self.world.mat[1:-1, 1:-1] = M.EMPTY
         self.world._wake_box = [0, self.world.h, 0, self.world.w]
         self.rig.grubs.clear()
@@ -434,8 +445,26 @@ class SandboxScreen:
             if g is not None and g.alive:
                 a = math.atan2(ui.my - g.y, ui.mx - g.x)
                 inp.aim = round(a * 1000) / 1000
-            for _ in range(self.app.sim_steps):
-                self.rig.step(inp)
+            # frame-budgeted slicing: spend at most ~60% of the frame
+            # budget on sim slices. A heavy tick then spans several
+            # frames (brief slow-motion) instead of freezing one — the
+            # render stays fluid no matter how much lava gets spammed.
+            self._tick_debt = min(self._tick_debt + self.app.sim_steps, 3)
+            cap = int(self.app.settings.get("fps_cap", 144)) or 144
+            budget = 0.6 / max(cap, 60)
+            t0 = time.perf_counter()
+            while True:
+                if self._slices is None:
+                    if not self._tick_debt:
+                        break
+                    self._tick_debt -= 1
+                    self._slices = self.rig.step_slices(inp)
+                try:
+                    next(self._slices)
+                except StopIteration:
+                    self._slices = None
+                if time.perf_counter() - t0 > budget:
+                    break
         if self.msg_t > 0:
             self.msg_t -= 1
 

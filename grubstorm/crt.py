@@ -84,7 +84,77 @@ class CRT:
         self._warp_x = self._warp_y = None
         self._hal = pygame.Surface((self.vw, self.vh))
         self._wide2 = pygame.Surface((self.vw, GRID_H))  # sharp, pre-rows
+        self._ren = None               # GPU chain (attach_gpu), else CPU
+        self._win = None
+        self._gpu_built_for = None
         self._build_overlays()
+
+    # ----------------------------------------------------------------- GPU
+    def attach_gpu(self, renderer, window):
+        """Run the big-surface chain on the GPU: upscales and the MUL/ADD
+        overlay blends become texture draws. The per-pixel stages that need
+        numpy (persist, fringe, bloom threshold, warp) stay on the CPU at
+        view resolution, where they are cheap."""
+        from pygame._sdl2.video import Texture
+        self._ren, self._win = renderer, window
+        self._tx_near = Texture(renderer, (GRID_W, GRID_H),
+                                streaming=True, scale_quality=0)
+        self._tx_lin = Texture(renderer, (GRID_W, GRID_H),
+                               streaming=True, scale_quality=1)
+        self._tx_wide = Texture(renderer, (self.vw, GRID_H),
+                                target=True, scale_quality=0)
+        self._tx_blo = Texture(renderer, (GRID_W // 8, GRID_H // 8),
+                               streaming=True, scale_quality=1)
+        white = pygame.Surface((1, 1)); white.fill((255, 255, 255))
+        self._tx_white = Texture.from_surface(renderer, white)
+        self._gpu_built_for = None
+
+    def _gpu_rebuild(self):
+        from pygame._sdl2.video import Texture
+        self._tx_phos = Texture.from_surface(self._ren, self._phosphor)
+        self._tx_shine = Texture.from_surface(self._ren, self._shine)
+        self._gpu_built_for = self._built_for
+
+    def _present_gpu(self, view, q, bloom_amt):
+        s = self.settings
+        ren = self._ren
+        if self._gpu_built_for != self._built_for:
+            self._gpu_rebuild()
+        # pixel-melt crossfade, exactly like the CPU path: sharp horizontal
+        # stretch, linear stretch alpha-blended on top, then the vertical
+        # row replication happens in the final nearest draw to the window
+        smear = float(s.get("crt_smear", 0.8))
+        self._tx_near.update(view)
+        ren.target = self._tx_wide
+        self._tx_near.draw(dstrect=(0, 0, self.vw, GRID_H))
+        if smear > 0.003:
+            self._tx_lin.update(view)
+            self._tx_lin.blend_mode = pygame.BLENDMODE_BLEND
+            self._tx_lin.alpha = int(255 * min(1.0, smear))
+            self._tx_lin.draw(dstrect=(0, 0, self.vw, GRID_H))
+        ren.target = None
+        ww, wh = self._win.size
+        full = (0, 0, ww, wh)
+        self._tx_wide.draw(dstrect=full)
+        self._tx_phos.blend_mode = pygame.BLENDMODE_MOD
+        self._tx_phos.draw(dstrect=full)
+        hal = float(s.get("crt_halation", 0.6))
+        if q is not None and hal > 0.03:
+            self._tx_blo.update(q)
+            self._tx_blo.blend_mode = pygame.BLENDMODE_ADD
+            self._tx_blo.alpha = int((50 + 70 * bloom_amt) * hal)
+            self._tx_blo.draw(dstrect=full)
+        if float(s.get("crt_vignette", 0.55)) > 0.05:
+            self._tx_shine.blend_mode = pygame.BLENDMODE_ADD
+            self._tx_shine.draw(dstrect=full)
+        flick = float(s.get("crt_flicker", 0.3))
+        if not s.get("reduce_flash") and flick > 0.03:
+            depth = int(9 * flick)
+            d = 255 - depth + random.randint(0, depth)
+            self._tx_white.blend_mode = pygame.BLENDMODE_MOD
+            self._tx_white.color = (d, d, d)
+            self._tx_white.draw(dstrect=full)
+        ren.present()
 
     # ------------------------------------------------------------- overlays
     def _overlay_key(self):
@@ -213,7 +283,7 @@ class CRT:
             del arr
 
         # bright-pass for bloom + halation, at low res
-        blo = None
+        blo = q = None
         if bloom_amt > 0.05:
             q = pygame.transform.smoothscale(view, (GRID_W // 4, GRID_H // 4))
             qa = pygame.surfarray.pixels3d(q)
@@ -233,6 +303,10 @@ class CRT:
             arr = pygame.surfarray.pixels3d(view)
             arr[:] = arr[self._warp_x, self._warp_y]
             del arr
+
+        if self._ren is not None:
+            self._present_gpu(view, q, bloom_amt)
+            return True
 
         # THE pixel-melt, crossfaded by its own slider. When the window is
         # exactly big-sized (the default), compose straight into it — the
@@ -275,3 +349,4 @@ class CRT:
             big.fill((d, d, d), special_flags=pygame.BLEND_RGB_MULT)
         if not direct:
             pygame.transform.scale(big, (sw, sh), screen)
+        return False

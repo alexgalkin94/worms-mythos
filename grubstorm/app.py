@@ -28,6 +28,7 @@ DEFAULT_SETTINGS = {
     "reduce_flash": False, "colorblind": False,
     "fullscreen": False, "server": "127.0.0.1:31999", "player_name": "Grub",
     "fps_cap": 144, "show_fps": False, "render_scale": 3,
+    "gpu_crt": True,
     **CRT_PRESETS["ARCADE"],
 }
 
@@ -64,7 +65,8 @@ def load_settings():
     _num("shake", 0.0, 2.0, 1.0)
     _num("volume", 0.0, 1.0, 0.8)
     _num("music", 0.0, 1.0, 0.6)
-    for k in ("reduce_flash", "colorblind", "fullscreen", "show_fps"):
+    for k in ("reduce_flash", "colorblind", "fullscreen", "show_fps",
+              "gpu_crt"):
         s[k] = bool(s.get(k, DEFAULT_SETTINGS[k]))
     try:
         s["fps_cap"] = int(s.get("fps_cap", 144))
@@ -1184,11 +1186,43 @@ class App:
 
     def apply_window(self):
         scale = int(self.settings.get("render_scale", 3))
-        flags = pygame.RESIZABLE
         size = (GRID_W * scale, GRID_H * scale)
+        if getattr(self, "gpu_win", None) is not None:
+            self.gpu_win.destroy()
+        self.gpu_win = None
+        # GPU compositing: the CRT chain (upscale + MUL/ADD overlay blends,
+        # by far the most expensive render stage) runs as texture draws on
+        # the graphics card. Needs a window WITHOUT an attached software
+        # surface, so it owns window creation; anything failing here falls
+        # back to the classic set_mode + CPU compositing path.
+        if self.settings.get("gpu_crt", True):
+            try:
+                from pygame._sdl2.video import Window, Renderer
+                if pygame.display.get_surface() is not None:
+                    pygame.display.quit()
+                    pygame.display.init()
+                win = Window("GRUBSTORM — every pixel is alive", size=size,
+                             resizable=True,
+                             fullscreen_desktop=bool(
+                                 self.settings.get("fullscreen")))
+                ren = Renderer(win, accelerated=1, vsync=False)
+                self.gpu_win = win
+                # placeholder so size-derived code keeps working
+                self.screen_surf = pygame.Surface(size)
+                self.crt = CRT(self.settings, scale)
+                self.crt.attach_gpu(ren, win)
+                return
+            except Exception:
+                if self.gpu_win is not None:
+                    self.gpu_win.destroy()
+                    self.gpu_win = None
+                pygame.display.quit()
+                pygame.display.init()
+        flags = pygame.RESIZABLE
         if self.settings.get("fullscreen"):
             flags = pygame.FULLSCREEN | pygame.SCALED
         self.screen_surf = pygame.display.set_mode(size, flags)
+        pygame.display.set_caption("GRUBSTORM — every pixel is alive")
         self.crt = CRT(self.settings, scale)
 
     def goto(self, screen):
@@ -1229,6 +1263,8 @@ class App:
             for e in events:
                 if e.type == pygame.QUIT:
                     self.running = False
+            if self.gpu_win is not None:
+                self.ui.win_size = self.gpu_win.size
             self.ui.begin(events)
             self.screen.update(events)
             # mood-aware soundtrack: menus get the theme, arenas their tone
@@ -1248,8 +1284,10 @@ class App:
                 fps = self._fps_font.render(f"{self.clock.get_fps():.0f}",
                                             True, (120, 255, 120))
                 view.blit(fps, (GRID_W - fps.get_width() - 2, GRID_H - 12))
-            self.crt.present(view, self.screen_surf)
-            pygame.display.flip()
+            # GPU mode presents through its renderer; only the CPU path
+            # has a display surface to flip
+            if not self.crt.present(view, self.screen_surf):
+                pygame.display.flip()
         save_settings(self.settings)
         pygame.quit()
 

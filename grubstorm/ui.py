@@ -33,11 +33,14 @@ class UI:
         self.hot = None
         self._hover_prev = None
         self.t = 0
+        self.win_size = None    # set by App in GPU mode (no display surface)
 
     def begin(self, events):
         self.t += 1
         mx, my = pygame.mouse.get_pos()
-        win = pygame.display.get_surface().get_size()
+        surf = pygame.display.get_surface()
+        win = surf.get_size() if surf is not None else \
+            (self.win_size or (GRID_W, GRID_H))
         self.mx = mx * GRID_W // max(1, win[0])
         self.my = my * GRID_H // max(1, win[1])
         self.clicked = False
