@@ -1298,7 +1298,12 @@ class App:
                 txt = (f"{self.clock.get_fps():.0f} {mode} "
                        f"u{self._ms_u:.1f} d{self._ms_d:.1f} c{self._ms_c:.1f}")
                 fps = self._fps_font.render(txt, True, (120, 255, 120))
-                view.blit(fps, (GRID_W - fps.get_width() - 2, GRID_H - 12))
+                fx = GRID_W - fps.get_width() - 2
+                fy = GRID_H - 12
+                pygame.draw.rect(view, (8, 8, 14),
+                                 (fx - 3, fy - 2, fps.get_width() + 5,
+                                  fps.get_height() + 4))
+                view.blit(fps, (fx, fy))
             # GPU mode presents through its renderer; only the CPU path
             # has a display surface to flip
             t_c0 = time.perf_counter()
