@@ -64,11 +64,20 @@ r.check("Renderer: view is grid-resolution 32-bit",
         f"{view.get_size()} @{view.get_bitsize()}bpp")
 layers = [app.renderer.cell_surf, app.renderer.gas_surf,
           app.renderer.liq_surf, app.renderer.em_surf]
-r.check("Renderer: cell/gas/liq/em layers share size + pixel format",
+# cell/em are opaque 32-bit; gas/liq carry per-pixel SRCALPHA (the fast
+# SIMD blit path) and must agree with each other
+r.check("Renderer: layer sizes + format contract (cell/em opaque, "
+        "gas/liq SRCALPHA pair)",
         all(s.get_size() == (GRID_W, GRID_H) for s in layers)
-        and len({s.get_shifts() for s in layers}) == 1
-        and len({s.get_bitsize() for s in layers}) == 1,
-        f"shifts {layers[0].get_shifts()}")
+        and all(s.get_bitsize() == 32 for s in layers)
+        and app.renderer.cell_surf.get_shifts()
+        == app.renderer.em_surf.get_shifts()
+        and app.renderer.gas_surf.get_shifts()
+        == app.renderer.liq_surf.get_shifts()
+        and (app.renderer.gas_surf.get_flags() & pygame.SRCALPHA
+             == app.renderer.liq_surf.get_flags() & pygame.SRCALPHA),
+        f"cell shifts {app.renderer.cell_surf.get_shifts()}, "
+        f"gas shifts {app.renderer.gas_surf.get_shifts()}")
 r.check("CRT: scale-3 window surface",
         app.screen_surf.get_size() == (GRID_W * 3, GRID_H * 3)
         and app.crt.scale == 3, f"{app.screen_surf.get_size()}")
