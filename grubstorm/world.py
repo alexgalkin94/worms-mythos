@@ -310,7 +310,7 @@ class World:
 
     # --- compressible-liquid constants (w-shadow.com mass model) ---------
     LMAX = np.float32(1.0)       # normal mass capacity of a cell
-    LCOMP = np.float32(0.03)     # extra capacity per cell of depth
+    LCOMP = np.float32(0.05)     # extra capacity per cell of depth
     LMIN_SEE = np.float32(0.10)  # a cell materializes above this mass
     LMIN_KEEP = np.float32(0.04) # and evaporates below this one
     LFLOW_MIN = np.float32(0.0015)
@@ -447,10 +447,10 @@ class World:
         spread_ok = mine & (m > self.LMIN_SEE) & \
             (self.v_rest < self.REST_K * 4)
         ml = shift(m, 0, -1, 0.0)
-        sl = np.clip((m - ml) * np.float32(0.25), 0.0, m) * ratem
+        sl = np.clip((m - ml) * np.float32(0.34), 0.0, m) * ratem
         sl[~(spread_ok & self._bshift(open_, 0, -1))] = 0.0
         mr = shift(m, 0, 1, 0.0)
-        sr = np.clip((m - mr) * np.float32(0.25), 0.0, m) * ratem
+        sr = np.clip((m - mr) * np.float32(0.34), 0.0, m) * ratem
         sr[~(spread_ok & self._bshift(open_, 0, 1))] = 0.0
         # UP: only compressed mass rises — this is the pressure release.
         # Under-relaxed by half: a cell squeezed between two stacked
