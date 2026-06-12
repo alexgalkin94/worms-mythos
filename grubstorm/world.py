@@ -44,6 +44,22 @@ def shift(a, dy, dx, fill):
     return out
 
 
+# derived material LUTs: bool / pre-scaled tables so the hot reaction passes
+# do one uint8-indexed np.take instead of a float gather plus compare (or a
+# gather, multiply AND compare) over the whole region. Values are identical
+# to computing them per cell — *0.5 is exact in float32.
+_PHASE_LIQ = M.PHASE == M.P_LIQUID
+_CORRO_HALF = M.CORRODIBLE * np.float32(0.5)
+
+# blast geometry cache: a disk's d2 plane and the explosion falloff/range
+# masks derived from it are pure functions of (radius, clip offsets) — the
+# same handful of patterns recur thousands of times during chain
+# detonations. Entries are frozen (writeable=False) so nothing can mutate
+# shared state; values are identical to recomputing them per call.
+_DISK_CACHE: dict[tuple, np.ndarray] = {}
+_BLAST_CACHE: dict[tuple, tuple] = {}
+
+
 class World:
     def __init__(self, seed: int, w: int = GRID_W, h: int = GRID_H):
         self.w, self.h = w, h
@@ -144,8 +160,16 @@ class World:
         y0, y1 = max(0, y - r), min(self.h, y + r + 1)
         if x0 >= x1 or y0 >= y1:
             return None
-        yy, xx = np.mgrid[y0:y1, x0:x1]
-        d2 = (yy - y) ** 2 + (xx - x) ** 2
+        key = (y0 - y, y1 - y, x0 - x, x1 - x)
+        d2 = _DISK_CACHE.get(key)
+        if d2 is None:
+            yy = np.arange(y0 - y, y1 - y)[:, None]
+            xx = np.arange(x0 - x, x1 - x)[None, :]
+            d2 = yy ** 2 + xx ** 2     # broadcast: ~4x cheaper than mgrid
+            d2.flags.writeable = False
+            if len(_DISK_CACHE) > 512:
+                _DISK_CACHE.clear()
+            _DISK_CACHE[key] = d2
         return slice(y0, y1), slice(x0, x1), d2
 
     def paint(self, x, y, r, mat, mode="fill", life=0, noise=0.0):
@@ -162,7 +186,7 @@ class World:
         if life == 0 and mat in (M.SMOKE, M.STEAM, M.TOXGAS, M.GAS):
             life = 200                # free gas always dissipates eventually
         if mode == "fill":
-            mask &= (M.PHASE[sub] == M.P_EMPTY) | (M.PHASE[sub] == M.P_GAS)
+            mask &= np.take(M.PHASE, sub) <= M.P_GAS   # == empty-or-gas
         elif mode == "replace":
             mask &= sub != M.BEDROCK
         if mode == "erase":
@@ -172,7 +196,7 @@ class World:
             sub[mask] = mat
         self.life[sy, sx][mask] = life
         self.burn[sy, sx][mask] = 0
-        self.shade[sy, sx][mask] = self.tex[sy, sx][mask]
+        np.copyto(self.shade[sy, sx], self.tex[sy, sx], where=mask)
         self.rest[sy, sx] = 0         # let nearby liquids react to the edit
         self.wake(sx.start - 1, sy.start - 1, sx.stop + 1, sy.stop + 1)
 
@@ -748,41 +772,77 @@ class World:
         mat, rng = self.v_mat, self.rng
         life, burn = self.v_life, self.v_burn
         oy, ox = self._ry0, self._rx0
+        # everything in this pass radiates from hot cells (fire, lava,
+        # burning fuel): crop to their bounding box +2 like the thermal box
+        # in _temp_pass. Margin 2, not 1: ignition can create new burning
+        # cells one cell OUT from hot (on near_hot), and those still emit
+        # fire into the cell above them within the same pass — so reads
+        # and writes reach hot+2 and the _bshift edge fill must only land
+        # where the real value is False too.
+        fire = mat == M.FIRE
+        hot = fire | (mat == M.LAVA)
+        hot |= burn > 0
+        rows = hot.any(1)
+        if not rows.any():
+            return
+        cols = hot.any(0)
+        r0 = max(0, int(rows.argmax()) - 2)
+        r1 = min(hot.shape[0], len(rows) - int(rows[::-1].argmax()) + 2)
+        c0 = max(0, int(cols.argmax()) - 2)
+        c1 = min(hot.shape[1], len(cols) - int(cols[::-1].argmax()) + 2)
+        mat = mat[r0:r1, c0:c1]
+        life = life[r0:r1, c0:c1]
+        burn = burn[r0:r1, c0:c1]
+        fire = fire[r0:r1, c0:c1]
+        hot = hot[r0:r1, c0:c1]
+        oy += r0
+        ox += c0
         # fire consumes itself. Random rolls are drawn per CANDIDATE, not
         # per region cell — a full-region float field x4 dominated this
         # pass in profiles while the candidate sets stay tiny.
-        fire = mat == M.FIRE
         if fire.any():
             self._wake_mask(fire, oy, ox)
-            life[fire] = np.maximum(life[fire].astype(np.int16) - 1, 0).astype(np.uint8)
+            # saturating decrement in place: no gather/scatter round-trip
+            np.subtract(life, 1, out=life, where=fire & (life > 0))
             dead = fire & (life == 0)
             ys, xs = nz2(dead)
             if len(ys):
                 r = rng.random(len(ys))
                 smoke = r < 0.25
-                mat[ys[smoke], xs[smoke]] = M.SMOKE
-                life[ys[smoke], xs[smoke]] = \
-                    rng.integers(40, 120, int(smoke.sum())).astype(np.uint8)
+                ysm, xsm = ys[smoke], xs[smoke]
+                mat[ysm, xsm] = M.SMOKE
+                life[ysm, xsm] = \
+                    rng.integers(40, 120, len(ysm)).astype(np.uint8)
                 mat[ys[~smoke], xs[~smoke]] = M.EMPTY
 
-        # ignition: anything flammable next to heat
-        hot = fire | (mat == M.LAVA) | (burn > 0)
+        # ignition: anything flammable next to heat (the hot mask from the
+        # crop above is still valid: dying fire only turned into SMOKE or
+        # EMPTY, never LAVA, and burn was untouched)
         near_hot = (self._bshift(hot, 1, 0) | self._bshift(hot, -1, 0) |
                     self._bshift(hot, 0, 1) | self._bshift(hot, 0, -1))
+        cand = np.take(FLAM_ANY, mat)
+        cand &= near_hot
+        cand &= burn == 0
         # heat agitates settled fluids so fuel keeps flowing toward flames
-        self.v_rest[near_hot | hot] = 0
-        cand = near_hot & (np.take(M.FLAMMABLE, mat) > 0) & (burn == 0)
-        ignite = np.zeros_like(cand)
+        # (cand reads near_hot, so fold hot in afterwards, in place)
+        near_hot |= hot
+        self.v_rest[r0:r1, c0:c1][near_hot] = 0
         cys, cxs = nz2(cand)
         if len(cys):
             roll = rng.random(len(cys))
-            lit = roll < M.FLAMMABLE[mat[cys, cxs]]
-            ignite[cys[lit], cxs[lit]] = True
-        if ignite.any():
-            self._wake_mask(ignite, oy, ox)
-            det = ignite & ((mat == M.EXPOWDER) | (mat == M.NITRO))
+            mats_c = mat[cys, cxs]
+            lit = roll < M.FLAMMABLE[mats_c]
+            iys, ixs, mi = cys[lit], cxs[lit], mats_c[lit]
+        else:
+            iys = ixs = mi = cys
+        # the lit candidates ARE the ignite set: working on the (tiny)
+        # index arrays replaces four full-region mask builds
+        if len(iys):
+            self.wake(ox + int(ixs.min()), oy + int(iys.min()),
+                      ox + int(ixs.max()), oy + int(iys.max()))
+            det = (mi == M.EXPOWDER) | (mi == M.NITRO)
             if det.any():
-                ys, xs = nz2(det)
+                ys, xs = iys[det], ixs[det]
                 # queue a handful per tick; the rest chain later
                 for i in range(min(len(ys), 4)):
                     self.pending_detonations.append(
@@ -790,12 +850,18 @@ class World:
                          int(mat[ys[i], xs[i]])))
                     mat[ys[i], xs[i]] = M.FIRE
                     life[ys[i], xs[i]] = 30
-            gasify = ignite & (mat == M.GAS)
-            mat[gasify] = M.FIRE
-            life[gasify] = rng.integers(20, 50)
-            rest = ignite & (np.take(M.BURN_FUEL, mat) > 0)
-            burn[rest] = 1
-            life[rest] = M.BURN_FUEL[mat[rest]]
+            gasify = mi == M.GAS
+            gys, gxs = iys[gasify], ixs[gasify]
+            mat[gys, gxs] = M.FIRE
+            life[gys, gxs] = rng.integers(20, 50)
+            # cells that just gasified or detonated burned to FIRE above
+            # (fuel 0 for explosives), so they drop out exactly as the
+            # mask-on-updated-mat version did
+            fuel = M.BURN_FUEL[mi]
+            rest = (fuel > 0) & ~gasify
+            rys, rxs = iys[rest], ixs[rest]
+            burn[rys, rxs] = 1
+            life[rys, rxs] = fuel[rest]
 
         # burning cells: emit fire above, lose fuel, die to residue
         burning = burn > 0
@@ -809,11 +875,12 @@ class World:
             if len(ys):
                 keep = rng.random(len(ys)) < 0.22
                 ys, xs = ys[keep], xs[keep]
-                mat[ys + up, xs] = M.FIRE
-                life[ys + up, xs] = rng.integers(25, 70, len(ys)).astype(np.uint8)
-            life[burning] = np.maximum(life[burning].astype(np.int16) - 1, 0).astype(np.uint8)
+                ysu = ys + up
+                mat[ysu, xs] = M.FIRE
+                life[ysu, xs] = rng.integers(25, 70, len(ys)).astype(np.uint8)
+            np.subtract(life, 1, out=life, where=burning & (life > 0))
             # liquids burn away faster
-            ys, xs = nz2(burning & (np.take(M.PHASE, mat) == M.P_LIQUID))
+            ys, xs = nz2(burning & np.take(_PHASE_LIQ, mat))
             if len(ys):
                 keep = rng.random(len(ys)) < 0.03
                 ys, xs = ys[keep], xs[keep]
@@ -840,20 +907,35 @@ class World:
             return
         # only freshly disturbed acid corrodes; settled pools turn inert
         # (and therefore cheap) until an explosion or flow stirs them up
-        fresh = self.v_rest < self.REST_K
-        if not (acid & fresh).any():
+        acid &= self.v_rest < self.REST_K
+        if not acid.any():
             return
+        # corrosion is strictly local: crop to the disturbed-acid bounding
+        # box +1 (like the thermal box in _temp_pass), so a stirred puddle
+        # inside a big awake region only pays for its own neighbourhood.
+        # Clipped window edges coincide with region edges, where shift's
+        # BEDROCK fill applied before too — the eat sets are identical.
+        rows = acid.any(1)
+        cols = acid.any(0)
+        r0 = max(0, int(rows.argmax()) - 1)
+        r1 = min(acid.shape[0], len(rows) - int(rows[::-1].argmax()) + 1)
+        c0 = max(0, int(cols.argmax()) - 1)
+        c1 = min(acid.shape[1], len(cols) - int(cols[::-1].argmax()) + 1)
+        mat = mat[r0:r1, c0:c1]
+        life = self.v_life[r0:r1, c0:c1]
+        fresh = (self.v_rest[r0:r1, c0:c1] < self.REST_K)
         # per-candidate rolls instead of a full-region random field
         roll = np.ones(mat.shape, np.float32)
-        ays, axs = nz2(acid & fresh)
+        ays, axs = nz2(acid[r0:r1, c0:c1])
         roll[ays, axs] = rng.random(len(ays))
         for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             acid = (mat == M.ACID) & fresh
             if not acid.any():
                 break
             nb = shift(mat, dy, dx, M.BEDROCK)
-            eat = acid & (np.take(M.CORRODIBLE, nb) > 0) & \
-                (roll < np.take(M.CORRODIBLE, nb) * 0.5)
+            # one pre-scaled gather; the >0 guard is redundant (roll >= 0,
+            # so an inert neighbour can never pass roll < 0)
+            eat = acid & (roll < np.take(_CORRO_HALF, nb))
             ys, xs = nz2(eat)
             if len(ys) == 0:
                 continue
@@ -864,7 +946,7 @@ class World:
             mat[ys[spend < 0.30], xs[spend < 0.30]] = M.EMPTY
             puff = spend > 0.93
             mat[ys[puff], xs[puff]] = M.TOXGAS
-            self.v_life[ys[puff], xs[puff]] = 140
+            life[ys[puff], xs[puff]] = 140
 
     def _water_lava_pass(self):
         mat = self.v_mat
@@ -873,29 +955,50 @@ class World:
         lava = mat == M.LAVA
         if not (water.any() and lava.any()):
             return
+        # reactions need water and lava within one cell of each other:
+        # crop to the overlap of the two bounding boxes +1, so far-apart
+        # pools cost a few row/column reductions instead of eight shifts
+        wr = water.any(1); wc = water.any(0)
+        lr = lava.any(1); lc = lava.any(0)
+        r0 = max(0, max(int(wr.argmax()), int(lr.argmax())) - 1)
+        r1 = min(mat.shape[0], min(len(wr) - int(wr[::-1].argmax()),
+                                   len(lr) - int(lr[::-1].argmax())) + 1)
+        c0 = max(0, max(int(wc.argmax()), int(lc.argmax())) - 1)
+        c1 = min(mat.shape[1], min(len(wc) - int(wc[::-1].argmax()),
+                                   len(lc) - int(lc[::-1].argmax())) + 1)
+        if r0 >= r1 or c0 >= c1:
+            return
+        mat = mat[r0:r1, c0:c1]
+        water = water[r0:r1, c0:c1]
+        lava = lava[r0:r1, c0:c1]
+        oy += r0
+        ox += c0
         lava_near = (self._bshift(lava, 1, 0) | self._bshift(lava, -1, 0) |
                      self._bshift(lava, 0, 1) | self._bshift(lava, 0, -1))
         boil = water & lava_near
         if boil.any():
             self._wake_mask(boil, oy, ox)
             mat[boil] = M.STEAM
-            self.v_life[boil] = 180
+            self.v_life[r0:r1, c0:c1][boil] = 180
         water_near = (self._bshift(water, 1, 0) | self._bshift(water, -1, 0) |
                       self._bshift(water, 0, 1) | self._bshift(water, 0, -1))
         quench = lava & water_near
-        mat[quench] = M.STONE
-        self.v_shade[quench] = 0  # dark obsidian look
-        self.v_temp[quench] = 80
+        if quench.any():
+            mat[quench] = M.STONE
+            self.v_shade[r0:r1, c0:c1][quench] = 0  # dark obsidian look
+            self.v_temp[r0:r1, c0:c1][quench] = 80
 
     def _gas_life_pass(self):
         # region-local: gas sealed away outside the region keeps (a feature —
         # dig into an old pocket and it's still there), free gas dissipates
         mat, life = self.v_mat, self.v_life
-        fade = (mat == M.SMOKE) | (mat == M.STEAM) | (mat == M.TOXGAS)
+        fade = mat == M.SMOKE
+        fade |= mat == M.STEAM
+        fade |= mat == M.TOXGAS
         if self.tick % 6 == 0:        # flammable gas fades much more slowly
             fade |= mat == M.GAS
         if fade.any():
-            life[fade] = np.maximum(life[fade].astype(np.int16) - 1, 0).astype(np.uint8)
+            np.subtract(life, 1, out=life, where=fade & (life > 0))
             gone = fade & (life == 0)
             if gone.any():
                 self._wake_mask(gone, self._ry0, self._rx0)
@@ -908,9 +1011,15 @@ class World:
         # thermal bounding box: the f32 diffusion only needs to run where
         # heat sources sit or temperature actually deviates from ambient —
         # a water region without fire skips the whole pass
-        src = (mat == M.LAVA) | (mat == M.FIRE) | (burn > 0) | \
-              (mat == M.ICE) | (mat == M.SNOW)
-        hot = src | (np.abs(t - self.ambient) > 0.6)
+        src = mat == M.LAVA
+        src |= mat == M.FIRE
+        src |= burn > 0
+        src |= mat == M.ICE
+        src |= mat == M.SNOW
+        dev = t - self.ambient
+        np.abs(dev, out=dev)
+        hot = dev > 0.6
+        hot |= src
         rows = hot.any(1)
         if not rows.any():
             return
@@ -925,17 +1034,25 @@ class World:
         life = life[r0:r1, c0:c1]
         oy += r0
         ox += c0
-        # sources clamp temperature
+        # sources clamp temperature (masked assignment: same result as the
+        # where= ufuncs — incl. NaN stays NaN — at a fraction of the cost)
         t[mat == M.LAVA] = 900.0
-        np.maximum(t, 380.0, where=(mat == M.FIRE), out=t)
-        np.maximum(t, 300.0, where=(burn > 0), out=t)
-        np.minimum(t, -16.0, where=(mat == M.ICE), out=t)
-        np.minimum(t, -8.0, where=(mat == M.SNOW), out=t)
-        # diffuse
-        avg = (shift(t, 1, 0, self.ambient) + shift(t, -1, 0, self.ambient) +
-               shift(t, 0, 1, self.ambient) + shift(t, 0, -1, self.ambient)) * 0.25
-        t += (avg - t) * 0.35
-        t += (self.ambient - t) * 0.012
+        t[(mat == M.FIRE) & (t < 380.0)] = 380.0
+        t[(burn > 0) & (t < 300.0)] = 300.0
+        t[(mat == M.ICE) & (t > -16.0)] = -16.0
+        t[(mat == M.SNOW) & (t > -8.0)] = -8.0
+        # diffuse: same left-to-right float ops, accumulated in one buffer
+        avg = shift(t, 1, 0, self.ambient)
+        avg += shift(t, -1, 0, self.ambient)
+        avg += shift(t, 0, 1, self.ambient)
+        avg += shift(t, 0, -1, self.ambient)
+        avg *= 0.25
+        np.subtract(avg, t, out=avg)
+        avg *= 0.35
+        t += avg
+        np.subtract(self.ambient, t, out=avg)
+        avg *= 0.012
+        t += avg
         # phase changes
         rng = self.rng
         roll = rng.random(mat.shape)
@@ -961,13 +1078,14 @@ class World:
             life[hot_oil] = M.BURN_FUEL[M.OIL]
         boom = ((mat == M.NITRO) & (t > 210)) | ((mat == M.EXPOWDER) & (t > 280))
         if boom.any():
-            ys, xs = nz2(boom)
-            for i in range(min(len(ys), 3)):
+            # only the first few detonate; skip the full divmod of nz2
+            bidx = np.flatnonzero(boom)
+            for f in bidx[:3]:
+                by, bx = divmod(int(f), boom.shape[1])
                 self.pending_detonations.append(
-                    (ox + int(xs[i]), oy + int(ys[i]),
-                     int(mat[ys[i], xs[i]])))
-                mat[ys[i], xs[i]] = M.FIRE
-                life[ys[i], xs[i]] = 30
+                    (ox + bx, oy + by, int(mat[by, bx])))
+                mat[by, bx] = M.FIRE
+                life[by, bx] = 30
 
     # ----------------------------------------------------------- explosions
     def explode(self, x, y, r, power, heat=120.0, make_fire=False,
@@ -976,12 +1094,27 @@ class World:
         d = self._disk(x, y, r)
         if d is not None:
             sy, sx, d2 = d
-            dist = np.sqrt(d2)
-            local = power * np.clip(1.15 - dist / max(r, 1), 0.0, 1.0) * 1.6
+            key = (r, sy.start - int(y), sx.start - int(x), d2.shape)
+            cached = _BLAST_CACHE.get(key)
+            if cached is None:
+                dist = np.sqrt(d2)
+                q = dist / max(r, 1)        # shared by local power and heat
+                cached = (np.clip(1.15 - q, 0.0, 1.0),
+                          np.clip(1.0 - q, 0, 1),
+                          dist <= r, dist <= r * 1.3, dist <= r * 1.4,
+                          dist <= r * 1.25, dist <= r * 1.6)
+                for a in cached:
+                    a.flags.writeable = False
+                if len(_BLAST_CACHE) > 256:
+                    _BLAST_CACHE.clear()
+                _BLAST_CACHE[key] = cached
+            fall, hfall, in_r, in13, in14, in125, in16 = cached
+            local = power * fall * 1.6
             sub = self.mat[sy, sx]
-            destroy = (dist <= r) & (M.HARDNESS[sub] < local) & (sub != M.BEDROCK)
+            destroy = in_r & (np.take(M.HARDNESS, sub) < local) & \
+                (sub != M.BEDROCK)
             # debris: sample some destroyed solid cells into particles
-            solid_destroyed = destroy & (M.SOLID[sub])
+            solid_destroyed = destroy & np.take(M.SOLID, sub)
             ys, xs = nz2(solid_destroyed)
             if len(ys):
                 take = self.rng.permutation(len(ys))[:min(len(ys), 60)]
@@ -997,36 +1130,37 @@ class World:
             self.rest[sy, sx] = 0     # liquids around the crater wake up
             # shave the 1px needles and shelves blasts leave behind —
             # they wedge worms into unwalkable slots
-            solid2 = M.SOLID[sub]
-            le = np.ones_like(solid2); re = np.ones_like(solid2)
-            le[:, 1:] = ~solid2[:, :-1]
-            re[:, :-1] = ~solid2[:, 1:]
-            ue = np.ones_like(solid2); de = np.ones_like(solid2)
-            ue[1:, :] = ~solid2[:-1, :]
-            de[:-1, :] = ~solid2[1:, :]
-            needle = solid2 & ((le & re) | (ue & de)) & \
-                (dist <= r * 1.4) & (sub != M.BEDROCK)
+            solid2 = np.take(M.SOLID, sub)
+            free2 = ~solid2
+            lr = np.ones_like(solid2)       # no solid on either side
+            lr[:, 1:] = free2[:, :-1]
+            lr[:, :-1] &= free2[:, 1:]
+            ud = np.ones_like(solid2)       # no solid above or below
+            ud[1:, :] = free2[:-1, :]
+            ud[:-1, :] &= free2[1:, :]
+            needle = solid2 & (lr | ud) & in14 & (sub != M.BEDROCK)
             sub[needle] = M.EMPTY
             # heat + sparks of fire inside the blast
-            self.temp[sy, sx] += heat * np.clip(1.0 - dist / max(r, 1), 0, 1) * 4
+            self.temp[sy, sx] += heat * hfall * 4
             if make_fire:
                 fz = destroy & (self.rng.random(destroy.shape) < 0.18)
                 sub[fz] = M.FIRE
-                self.life[sy, sx][fz] = self.rng.integers(30, 80, int(fz.sum())).astype(np.uint8)
+                self.life[sy, sx][fz] = self.rng.integers(
+                    30, 80, int(np.count_nonzero(fz))).astype(np.uint8)
             # secondary: explosives caught in the blast chain-react
-            chain = (dist <= r * 1.3) & ((sub == M.EXPOWDER) | (sub == M.NITRO))
-            cys, cxs = nz2(chain)
-            for i in range(min(len(cys), 5)):
+            chain = in13 & ((sub == M.EXPOWDER) | (sub == M.NITRO))
+            cidx = np.flatnonzero(chain)
+            for f in cidx[:5]:           # only the first few are queued
+                cy, cx = divmod(int(f), chain.shape[1])
                 self.pending_detonations.append(
-                    (sx.start + int(cxs[i]), sy.start + int(cys[i]),
-                     int(sub[cys[i], cxs[i]])))
-                sub[cys[i], cxs[i]] = M.FIRE
+                    (sx.start + cx, sy.start + cy, int(sub[cy, cx])))
+                sub[cy, cx] = M.FIRE
             # gas pockets in range deflagrate
-            gasm = (dist <= r * 1.6) & (sub == M.GAS)
+            gasm = in16 & (sub == M.GAS)
             sub[gasm] = M.FIRE
             self.life[sy, sx][gasm] = 40
             # splash liquids outward as droplets
-            liq = (dist <= r * 1.25) & (M.LIQUID[sub])
+            liq = in125 & np.take(M.LIQUID, sub)
             lys, lxs = nz2(liq)
             if len(lys):
                 take = self.rng.permutation(len(lys))[:min(len(lys), 50)]
@@ -1147,24 +1281,27 @@ class World:
 
     # ------------------------------------------------------------ snapshot
     def to_bytes(self) -> bytes:
+        # head/temp are always uint32/float32 (set in __init__/from_bytes),
+        # so plain tobytes() yields the exact same bytes without the
+        # defensive astype copy. zlib level 6 is part of the wire format.
         payload = b"".join([
             self.mat.tobytes(), self.shade.tobytes(), self.life.tobytes(),
             self.burn.tobytes(), self.rest.tobytes(),
-            self.head.astype(np.uint32).tobytes(),
-            self.temp.astype(np.float32).tobytes(),
+            self.head.tobytes(), self.temp.tobytes(),
         ])
         return zlib.compress(payload, 6)
 
     def from_bytes(self, data: bytes):
         raw = zlib.decompress(data)
         n = self.w * self.h
-        self.mat = np.frombuffer(raw[:n], np.uint8).reshape(self.h, self.w).copy()
-        self.shade = np.frombuffer(raw[n:2*n], np.uint8).reshape(self.h, self.w).copy()
-        self.life = np.frombuffer(raw[2*n:3*n], np.uint8).reshape(self.h, self.w).copy()
-        self.burn = np.frombuffer(raw[3*n:4*n], np.uint8).reshape(self.h, self.w).copy()
-        self.rest = np.frombuffer(raw[4*n:5*n], np.uint8).reshape(self.h, self.w).copy()
-        self.head = np.frombuffer(raw[5*n:9*n], np.uint32).reshape(self.h, self.w).copy()
-        self.temp = np.frombuffer(raw[9*n:13*n], np.float32).reshape(self.h, self.w).copy()
+        # frombuffer(offset=) reads in place — no bytes-slice copies
+        self.mat = np.frombuffer(raw, np.uint8, n).reshape(self.h, self.w).copy()
+        self.shade = np.frombuffer(raw, np.uint8, n, n).reshape(self.h, self.w).copy()
+        self.life = np.frombuffer(raw, np.uint8, n, 2*n).reshape(self.h, self.w).copy()
+        self.burn = np.frombuffer(raw, np.uint8, n, 3*n).reshape(self.h, self.w).copy()
+        self.rest = np.frombuffer(raw, np.uint8, n, 4*n).reshape(self.h, self.w).copy()
+        self.head = np.frombuffer(raw, np.uint32, n, 5*n).reshape(self.h, self.w).copy()
+        self.temp = np.frombuffer(raw, np.float32, n, 9*n).reshape(self.h, self.w).copy()
         # rebuild the derived mirrors HERE, before re-binding the flat
         # views: future active regions assume out-of-region mirrors are
         # valid, and any later wholesale replacement would orphan the
