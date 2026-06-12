@@ -49,7 +49,7 @@ def shift(a, dy, dx, fill):
 # gather, multiply AND compare) over the whole region. Values are identical
 # to computing them per cell — *0.5 is exact in float32.
 _PHASE_LIQ = M.PHASE == M.P_LIQUID
-_CORRO_HALF = M.CORRODIBLE * np.float32(0.5)
+_CORRO_FULL = M.CORRODIBLE.astype(np.float32)
 
 # blast geometry cache: a disk's d2 plane and the explosion falloff/range
 # masks derived from it are pure functions of (radius, clip offsets) — the
@@ -348,6 +348,13 @@ class World:
         n = self._apply_moves(powder & (below_free | sink), g, 0)
         if not lateral:                       # falling runs every substep,
             return n                          # toppling once per tick
+        # settled-pile early-out: if nothing fell/sank this call and every
+        # powder grain in the region has rested, the toppling masks below
+        # cannot produce work that a disturbance wouldn't first announce —
+        # paints, explosions, edits and corrosion all clear rest around
+        # themselves, and any fall resets rest at both ends
+        if n == 0 and not (powder & (self.v_rest < self.REST_K)).any():
+            return 0
         # diagonal slide (uniform direction per call avoids target conflicts).
         # SLIDE sets how lively a powder topples; CLUMPY powders (snow,
         # ash) only topple over steep 2-cell drops, so their piles hold
@@ -424,6 +431,23 @@ class World:
         fast2 = rnd > visc * 0.5
         r_lo = rnd < 0.5
         r_hi = rnd >= 0.5
+        # ---- viscous cadence gate -----------------------------------
+        # a region whose every liquid is thick (lava/sludge/gels,
+        # VISCOSITY >= 0.5) takes its lateral step every 2nd tick: odd
+        # ticks skip the whole lateral machinery (head solver, flow,
+        # teleport, pours, creep), even ticks run with doubled mobility
+        # (2v-1: skip-chance halved) so the average spread rate is kept.
+        # Gated on tick parity — sim state, never the rng stream. Any
+        # thin liquid in the region (water, acid...) disables the gate;
+        # falls and slumps are never gated, so streams stay smooth.
+        fastr_l = fastr
+        if lateral:
+            lv = visc[liq]
+            if lv.size and float(lv.min()) >= 0.5:
+                if self.tick % 2 == 1:
+                    lateral = False
+                else:
+                    fastr_l = rnd > (visc + visc - np.float32(1.0))
         n = 0
         real_work = np.zeros_like(liq)
         d = 1 if parity else -1
@@ -566,7 +590,7 @@ class World:
                     bx1 = len(lcols) - int(lcols[::-1].argmax())
                     hdw = hde[by0:by1, bx0:bx1]
                     brw = barrier[by0:by1, bx0:bx1]
-                    for _ in range(5 if hot else 2):
+                    for _ in range(4 if hot else 1):
                         np.minimum(hdw[1:], hdw[:-1], out=hdw[1:])
                         np.bitwise_or(hdw, brw, out=hdw)
                         np.minimum(hdw[:-1], hdw[1:], out=hdw[:-1])
@@ -585,7 +609,7 @@ class World:
             # two flow rounds per tick: pipe transport works by bubbles
             # walking backwards through the duct one cell per round, so
             # this directly doubles tunnel throughput
-            deep_ok = deep & not_cling & fastr
+            deep_ok = deep & not_cling & fastr_l
             if deep_ok.any():
                 for _round in range(2):
                     round_n = 0
@@ -610,7 +634,7 @@ class World:
             # Deterministic: sorted matching, no probability gates.
             liq2 = self.v_phm == M.P_LIQUID
             cand = liq2 & surfm & not_cling & \
-                (hd != np.uint32(0xFFFFFFFF)) & fastr
+                (hd != np.uint32(0xFFFFFFFF)) & fastr_l
             if cand.any():
                 cy, cx = nz2(cand)
                 cid = hd[cy, cx]
@@ -664,7 +688,7 @@ class World:
             free = ph <= M.P_GAS
             liq = (self.v_phm == M.P_LIQUID) & not_cling
             grounded = liq & ~self._bshift(free, g, 0)
-            side_free = self._bshift(free, 0, dd) & fastr & \
+            side_free = self._bshift(free, 0, dd) & fastr_l & \
                 (r_lo if dd == d else r_hi)
             pour = self._bshift(free, g, dd)
             pouring = grounded & side_free & pour
@@ -715,7 +739,7 @@ class World:
                 self._bshift(free, -g, 0) & \
                 self._bshift(free, 0, dd) & \
                 ~self._bshift(free, g, dd) & \
-                fastr & (r_lo if dd == d else r_hi)
+                fastr_l & (r_lo if dd == d else r_hi)
             slide = surf & self._bshift(free, g, 2 * dd)
             n += self._apply_moves(slide, 0, dd)
             if creep_on:
@@ -735,22 +759,32 @@ class World:
         if not gas.any():
             return 0
         g = -self.gravity_dir
-        empty = ph == M.P_EMPTY
-        # fire clings to flammable fuel directly beneath it; other fire
-        # lingers a little before floating up
-        is_fire = self.v_mat == M.FIRE
-        if is_fire.any():
-            fuel_below = self._bshift(np.take(FLAM_ANY, self.v_mat),
-                                      self.gravity_dir, 0)
-            stuck = is_fire & fuel_below
-            gas = gas & ~stuck
-        else:
-            stuck = np.zeros_like(gas)
-        # rnd < (0.45 if fire else 0.8), spelled as scalar compares: 0.45
-        # implies 0.8, so the per-cell threshold select costs no np.where
-        rise = (rnd < np.float32(0.8)) & ((rnd < np.float32(0.45)) | ~is_fire)
-        n = self._apply_moves(gas & self._bshift(empty, g, 0) & rise,
-                              g, 0)
+        # gases run at 30 Hz (every 2nd tick). The cheap vertical rise is
+        # double-stepped so smoke/steam climb at (almost) the old apparent
+        # speed; the expensive diagonal/lateral machinery runs once per
+        # call — that is where the time goes, and drifting half as often
+        # reads as slightly calmer clouds, not slower ones.
+        n = 0
+        for _ in range(2):
+            ph = self.v_phase
+            gas = ph == M.P_GAS
+            empty = ph == M.P_EMPTY
+            # fire clings to flammable fuel directly beneath it; other
+            # fire lingers a little before floating up
+            is_fire = self.v_mat == M.FIRE
+            if is_fire.any():
+                fuel_below = self._bshift(np.take(FLAM_ANY, self.v_mat),
+                                          self.gravity_dir, 0)
+                stuck = is_fire & fuel_below
+                gas = gas & ~stuck
+            else:
+                stuck = np.zeros_like(gas)
+            # rnd < (0.45 if fire else 0.8) as scalar compares: 0.45
+            # implies 0.8, so the threshold select costs no np.where
+            rise = (rnd < np.float32(0.8)) & \
+                ((rnd < np.float32(0.45)) | ~is_fire)
+            n += self._apply_moves(gas & self._bshift(empty, g, 0) & rise,
+                                   g, 0)
         d = 1 if parity else -1
         if abs(self.wind) > 0.01:           # wind drifts gases
             d = 1 if self.wind > 0 else -1
@@ -941,14 +975,28 @@ class World:
             if not acid.any():
                 break
             nb = shift(mat, dy, dx, M.BEDROCK)
-            # one pre-scaled gather; the >0 guard is redundant (roll >= 0,
-            # so an inert neighbour can never pass roll < 0)
-            eat = acid & (roll < np.take(_CORRO_HALF, nb))
+            # the pass runs at 15 Hz; the eat chance is doubled (x0.5 ->
+            # x1.0, max CORRODIBLE is 0.5 so probabilities stay < 1) to
+            # keep the average corrosion speed of the old 30 Hz cadence.
+            # The >0 guard is redundant (roll >= 0 never passes < 0)
+            eat = acid & (roll < np.take(_CORRO_FULL, nb))
             ys, xs = nz2(eat)
             if len(ys) == 0:
                 continue
             ty, tx = ys + dy, xs + dx
             mat[ty, tx] = M.EMPTY
+            # corrosion is a disturbance: clear rest in a 1-cell halo
+            # around each eaten cell so settled neighbours re-arm (sand
+            # above a corroded ledge topples, water behind a corroded dam
+            # flows) — required by the settled-powder early-out. Halo in
+            # REGION coordinates so crop-edge neighbours wake too.
+            rst = self.v_rest
+            hh, ww = rst.shape
+            yg, xg = ty + r0, tx + c0
+            for dy2 in (-1, 0, 1):
+                yc = np.minimum(np.maximum(yg + dy2, 0), hh - 1)
+                for dx2 in (-1, 0, 1):
+                    rst[yc, np.minimum(np.maximum(xg + dx2, 0), ww - 1)] = 0
             # some acid is spent, sometimes leaving a toxic puff
             spend = rng.random(len(ys))
             mat[ys[spend < 0.30], xs[spend < 0.30]] = M.EMPTY
@@ -1263,12 +1311,16 @@ class World:
                     parity, lateral=(s == 0))
                 yield                     # slice boundary: one substep done
             self.v_phm[...] = self.v_phase
-            moves += self._gas_pass(self.tick % 2 == 0)
+            if self.tick % 2 == 0:        # gases tick at 30 Hz (see pass)
+                moves += self._gas_pass((self.tick >> 1) % 2 == 0)
             # every fluid cell ages toward rest; real flow resets the clock.
             # P_GAS/P_LIQUID are 1/2, so one wrapping subtract covers both;
             # adding the saturation mask as 0/1 beats a fancy-index +=
             ph = self.v_phase
-            fluid = (ph - np.uint8(1)) <= np.uint8(1)
+            # gas/liquid/powder all age toward rest (wrapping subtract:
+            # phases 1..3); a fully rested pile lets the powder pass skip
+            # its toppling masks — falls and sinks still run every substep
+            fluid = (ph - np.uint8(1)) <= np.uint8(2)
             inc = fluid & (self.v_rest < 255)
             self.v_rest += inc
             # reactions only happen where something is awake. During the
@@ -1280,8 +1332,8 @@ class World:
             if not self.settle_mode:
                 if self.tick % 2 == 1:
                     self._fire_pass()    # 30 Hz is plenty for flames
-                if self.tick % 2 == 0:
-                    self._acid_pass()
+                if self.tick % 4 == 0:
+                    self._acid_pass()   # 15 Hz; eat chance doubled inside
                 if self.tick % 2 == 1:
                     self._temp_pass()
             self._water_lava_pass()
