@@ -16,6 +16,8 @@ _KEY = (255, 0, 255)
 
 PAL_FLAT = M.PALETTE.reshape(M.N_MATS * 4, 3).copy()
 EMIT_FLAT = M.EMISSION.copy()
+# per-material RGB tuples, so per-particle draws don't rebuild them
+PAL_RGB = [tuple(int(c) for c in row[1]) for row in M.PALETTE]
 
 _BURN_RGB = np.array([(255, 140, 40), (255, 100, 30),
                       (240, 180, 60)], np.uint8)
@@ -62,16 +64,22 @@ class Renderer:
         self.cell_surf = pygame.Surface((GRID_W, GRID_H))
         self.cell_surf.set_colorkey(_KEY)
         self.cell_surf.fill(_KEY)
-        self.gas_surf = pygame.Surface((GRID_W, GRID_H))
-        self.gas_surf.set_colorkey(_KEY)
-        self.gas_surf.set_alpha(150)
-        self.gas_surf.fill(_KEY)
-        self.liq_surf = pygame.Surface((GRID_W, GRID_H))
-        self.liq_surf.set_colorkey(_KEY)
-        self.liq_surf.set_alpha(205)
-        self.liq_surf.fill(_KEY)
+        # gas/liquid layers carry their translucency as per-pixel alpha:
+        # SDL's SRCALPHA blit has a SIMD fast path and runs ~15x faster
+        # than the colorkey + surface-alpha mode (±1 LSB blend rounding).
+        # _build_pal32 falls back to the colorkey mode on exotic formats.
+        self.gas_surf = pygame.Surface((GRID_W, GRID_H), pygame.SRCALPHA)
+        self.gas_surf.fill((0, 0, 0, 0))
+        self.liq_surf = pygame.Surface((GRID_W, GRID_H), pygame.SRCALPHA)
+        self.liq_surf.fill((0, 0, 0, 0))
+        self._gas_a32 = self._liq_a32 = None
         self.em_surf = pygame.Surface((GRID_W, GRID_H))
         self._glow = pygame.Surface((GRID_W, GRID_H))
+        self._em_small = pygame.Surface((GRID_W // 6, GRID_H // 6))
+        self._em_small2 = pygame.Surface((GRID_W // 6 // 2, GRID_H // 6 // 2))
+        self._dark_buf = pygame.Surface((GRID_W, GRID_H))
+        self._flash_surf = None
+        self._hud_totmax = None
         self._dark = None
         self._light_built = False
         self._world_ref = None
@@ -113,45 +121,56 @@ class Renderer:
         return self._sky_cache
 
     def _draw_decor(self, spec):
+        # one loop per kind: the kind is fixed per map, so dispatching once
+        # outside the loop spares 60 chained comparisons every frame
         v = self.view
         t = self._t
         kind = spec.decor
-        for i, (x, y, z) in enumerate(self._decor):
-            if kind == "stars":
+        dec = self._decor
+        if kind == "stars":
+            for i, (x, y, z) in enumerate(dec):
                 if (i + t // 30) % 7:
                     v.set_at((int(x), int(y * 0.7)), (200, 200, 220))
-            elif kind == "embers":
+        elif kind == "embers":
+            for i, (x, y, z) in enumerate(dec):
                 yy = (y - t * 0.2 * z) % GRID_H
                 v.set_at((int((x + math.sin(t * 0.01 + i) * 8) % GRID_W),
                           int(yy)), (255, int(120 * z), 20))
-            elif kind == "snow":
+        elif kind == "snow":
+            for i, (x, y, z) in enumerate(dec):
                 yy = (y + t * 0.3 * z) % GRID_H
                 v.set_at((int((x + math.sin(t * 0.02 + i) * 10) % GRID_W),
                           int(yy)), (230, 235, 250))
-            elif kind == "clouds":
-                if i % 6 == 0:
-                    xx = (x + t * 0.05 * z) % (GRID_W + 60) - 30
-                    pygame.draw.ellipse(v, (96, 88, 102),
-                                        (xx, y * 0.35, 38 * z, 9 * z))
-                    pygame.draw.ellipse(v, (118, 108, 122),
-                                        (xx + 8 * z, y * 0.35 - 3 * z,
-                                         22 * z, 8 * z))
-            elif kind == "drips":
+        elif kind == "clouds":
+            for i in range(0, len(dec), 6):
+                x, y, z = dec[i]
+                xx = (x + t * 0.05 * z) % (GRID_W + 60) - 30
+                pygame.draw.ellipse(v, (96, 88, 102),
+                                    (xx, y * 0.35, 38 * z, 9 * z))
+                pygame.draw.ellipse(v, (118, 108, 122),
+                                    (xx + 8 * z, y * 0.35 - 3 * z,
+                                     22 * z, 8 * z))
+        elif kind == "drips":
+            for i in range(0, len(dec), 3):
+                x, y, z = dec[i]
                 yy = (y + t * 0.8 * z) % GRID_H
-                if i % 3 == 0:
-                    v.set_at((int(x), int(yy)), (90, 140, 80))
-            elif kind == "bubbles":
+                v.set_at((int(x), int(yy)), (90, 140, 80))
+        elif kind == "bubbles":
+            for (x, y, z) in dec:
                 yy = (y - t * 0.25 * z) % GRID_H
                 v.set_at((int(x), int(yy)), (255, 190, 220))
-            elif kind == "spores":
+        elif kind == "spores":
+            for i, (x, y, z) in enumerate(dec):
                 yy = (y - t * 0.1 * z) % GRID_H
                 if (i + t // 20) % 5:
                     v.set_at((int(x), int(yy)), (120, 200, 160))
-            elif kind == "dust":
+        elif kind == "dust":
+            for i in range(1, len(dec), 2):
+                x, y, z = dec[i]
                 xx = (x + t * 0.3 * z) % GRID_W
-                if i % 2:
-                    v.set_at((int(xx), int(y)), (180, 150, 110))
-            elif kind == "sparks":
+                v.set_at((int(xx), int(y)), (180, 150, 110))
+        elif kind == "sparks":
+            for i, (x, y, z) in enumerate(dec):
                 if (i * 13 + t // 8) % 11 == 0:
                     v.set_at((int(x), int(y)), (255, 230, 120))
 
@@ -194,10 +213,15 @@ class Renderer:
         gasT = phT == M.P_GAS
         liqT = phT == M.P_LIQUID
         key32 = self._key32
-        gas32 = np.full_like(rgb32, key32)
-        np.copyto(gas32, rgb32, where=gasT)
-        liq32 = np.full_like(rgb32, key32)
-        np.copyto(liq32, rgb32, where=liqT)
+        if self._gas_a32 is not None:         # per-pixel-alpha layers
+            zero = np.uint32(0)
+            gas32 = np.where(gasT, rgb32 | self._gas_a32, zero)
+            liq32 = np.where(liqT, rgb32 | self._liq_a32, zero)
+        else:                                 # colorkey fallback
+            gas32 = np.full_like(rgb32, key32)
+            np.copyto(gas32, rgb32, where=gasT)
+            liq32 = np.full_like(rgb32, key32)
+            np.copyto(liq32, rgb32, where=liqT)
         rgb32[phT <= M.P_LIQUID] = key32      # key out empty + gas + liquid
         sx, sy = slice(x0, x1), slice(y0, y1)
         pygame.surfarray.pixels2d(self.cell_surf)[sx, sy] = rgb32
@@ -209,7 +233,9 @@ class Renderer:
 
     def _build_pal32(self):
         """Pack palette/emission/key colors into the cell surface's pixel
-        format. All four layer surfaces share one format (created equal)."""
+        format. The cell/em surfaces share it (created equal); the alpha
+        layers add their alpha bits if their RGB channels line up, else
+        they drop back to the old colorkey + surface-alpha mode."""
         sr, sg, sb, _ = self.cell_surf.get_shifts()
 
         def pack(rgb):
@@ -221,6 +247,21 @@ class Renderer:
         self._burn32 = pack(_BURN_RGB)
         self._key32 = np.uint32(self.cell_surf.map_rgb(_KEY))
         self._shifts32 = (sr, sg, sb)
+        gr, gg, gb, ga = self.gas_surf.get_shifts()
+        if self.gas_surf.get_flags() & pygame.SRCALPHA and \
+                (gr, gg, gb) == (sr, sg, sb):
+            self._gas_a32 = np.uint32(150 << ga)
+            self._liq_a32 = np.uint32(205 << ga)
+        else:
+            self._gas_a32 = self._liq_a32 = None
+            self.gas_surf = pygame.Surface((GRID_W, GRID_H))
+            self.gas_surf.set_colorkey(_KEY)
+            self.gas_surf.set_alpha(150)
+            self.liq_surf = pygame.Surface((GRID_W, GRID_H))
+            self.liq_surf.set_colorkey(_KEY)
+            self.liq_surf.set_alpha(205)
+            for surf in (self.gas_surf, self.liq_surf):
+                surf.fill(_KEY)
 
     def _edge_shade(self, world, rgb32, y0, y1, x0, x1):
         """Noita-style material edges: dark outline where terrain meets air,
@@ -265,22 +306,25 @@ class Renderer:
             rgb32[maskT] = out
 
     def _rebuild_light(self, world, spec, projectiles=()):
-        """Blurred glow from the emission surface + cave darkness."""
-        sw, sh = GRID_W // 6, GRID_H // 6
-        small = pygame.transform.smoothscale(self.em_surf, (sw, sh))
-        small = pygame.transform.smoothscale(small, (sw // 2, sh // 2))
-        self._glow = pygame.transform.smoothscale(small, (GRID_W, GRID_H))
+        """Blurred glow from the emission surface + cave darkness.
+        All scratch surfaces are preallocated and the glow upscale is
+        shared with the darkness pass (its per-surface alpha is ignored
+        by the BLEND_RGB_ADD blits below, so it equals the old light_up)."""
+        small = self._em_small
+        pygame.transform.smoothscale(self.em_surf, small.get_size(), small)
+        small2 = self._em_small2
+        pygame.transform.smoothscale(small, small2.get_size(), small2)
+        glow = self._glow
+        pygame.transform.smoothscale(small2, (GRID_W, GRID_H), glow)
         bloom = float(self.settings.get("bloom", 0.7))
-        if bloom < 0.99:
-            self._glow.set_alpha(int(255 * bloom))
+        glow.set_alpha(int(255 * bloom) if bloom < 0.99 else None)
         amb = spec.light
         if amb < 0.999:
-            dark = pygame.Surface((GRID_W, GRID_H))
+            dark = self._dark_buf
             base = int(80 + amb * 175)
             dark.fill((base, base, base))
-            light_up = pygame.transform.smoothscale(small, (GRID_W, GRID_H))
             for _ in range(2):
-                dark.blit(light_up, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
+                dark.blit(glow, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
             for p in projectiles:
                 pygame.draw.circle(dark, (70, 60, 50), (int(p.x), int(p.y)), 16)
             self._dark = dark
@@ -451,8 +495,7 @@ class Renderer:
                 pygame.draw.line(v, (255, 255, 160),
                                  (x, y), (x - int(ps.vx[i]), y - int(ps.vy[i])))
             else:
-                m = int(ps.mat[i])
-                v.set_at((x, y), tuple(int(c) for c in M.PALETTE[m][1]))
+                v.set_at((x, y), PAL_RGB[ps.mat[i]])
 
     def _draw_entities(self, game):
         v = self.view
@@ -561,9 +604,15 @@ class Renderer:
         pygame.draw.circle(v, (16, 16, 26), (16, 12), 10)
         pygame.draw.circle(v, (90, 90, 120), (16, 12), 10, 1)
         v.blit(timer, (16 - timer.get_width() // 2, 12 - timer.get_height() // 2))
-        # team health bars
+        # team health bars (max_hp never changes after match start — compute
+        # the scale once per game instead of summing every frame)
         yy = 4
-        total_max = max(1, max(sum(g.max_hp for g in t.grubs) for t in game.teams))
+        tm = self._hud_totmax
+        if tm is None or tm[0] is not game:
+            tm = (game, max(1, max(sum(g.max_hp for g in t.grubs)
+                                   for t in game.teams)))
+            self._hud_totmax = tm
+        total_max = tm[1]
         for i, t in enumerate(game.teams):
             col = self.team_color(t.color_idx)
             hp = t.total_hp()
@@ -666,8 +715,10 @@ class Renderer:
         if hud:
             self.apply_camera()
         if self.camera.flash > 0.03 and not self.settings.get("reduce_flash"):
-            f = pygame.Surface((GRID_W, GRID_H))
-            f.fill((255, 240, 220))
+            f = self._flash_surf
+            if f is None:
+                f = self._flash_surf = pygame.Surface((GRID_W, GRID_H))
+                f.fill((255, 240, 220))
             f.set_alpha(int(90 * self.camera.flash))
             v.blit(f, (0, 0))
         if hud:

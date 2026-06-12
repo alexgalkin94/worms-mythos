@@ -14,6 +14,7 @@ from .particles import Particles, KIND_MAT
 from .grub import Grub
 from .bodies import RigidBody
 from .game import InputFrame
+from .render import PAL_RGB
 from .weapons import WEAPONS, W_BY_KEY
 from .ui import ACCENT, ACCENT2, FG, DIM
 
@@ -233,6 +234,7 @@ class SandboxScreen:
         self._hover_name = ""
         self._stroke = None            # last painted point for interpolation
         self._pt1 = None               # anchor for two-point tools
+        self._grid_bg = None           # cached blueprint-grid backdrop
 
         class _LabSpec:
             light = 0.85
@@ -481,12 +483,17 @@ class SandboxScreen:
     # ---------------------------------------------------------------- draw
     def draw(self, view):
         app, ui = self.app, self.app.ui
-        view.fill((11, 11, 19))
-        # blueprint grid so empty space reads as lab, not void
-        for gx in range(0, GRID_W, 24):
-            pygame.draw.line(view, (16, 17, 30), (gx, 0), (gx, GRID_H))
-        for gy in range(0, GRID_H, 24):
-            pygame.draw.line(view, (16, 17, 30), (0, gy), (GRID_W, gy))
+        # blueprint grid so empty space reads as lab, not void — static,
+        # so it's drawn once and blitted instead of 49 lines per frame
+        if self._grid_bg is None:
+            bg = pygame.Surface((GRID_W, GRID_H))
+            bg.fill((11, 11, 19))
+            for gx in range(0, GRID_W, 24):
+                pygame.draw.line(bg, (16, 17, 30), (gx, 0), (gx, GRID_H))
+            for gy in range(0, GRID_H, 24):
+                pygame.draw.line(bg, (16, 17, 30), (0, gy), (GRID_W, gy))
+            self._grid_bg = bg
+        view.blit(self._grid_bg, (0, 0))
         r = app.renderer
         r._t += 1
         changed = r.refresh_cells(self.world)
@@ -589,8 +596,7 @@ class SandboxScreen:
                 cx = x0 + 8
                 for m in row[ri:ri + 5]:
                     r2 = pygame.Rect(cx, y, 17, 10)
-                    col = tuple(int(c) for c in M.PALETTE[m][1])
-                    pygame.draw.rect(view, col, r2)
+                    pygame.draw.rect(view, PAL_RGB[m], r2)
                     pygame.draw.rect(view, (8, 8, 12), r2, 1)
                     if m == self.mat and self.tool == "paint":
                         pygame.draw.rect(view, (255, 255, 255),
@@ -706,5 +712,4 @@ class SandboxScreen:
         for i in ps.live_indices():
             x, y = int(ps.x[i]), int(ps.y[i])
             if 0 <= x < GRID_W and 0 <= y < GRID_H:
-                view.set_at((x, y),
-                            tuple(int(c) for c in M.PALETTE[int(ps.mat[i])][1]))
+                view.set_at((x, y), PAL_RGB[ps.mat[i]])

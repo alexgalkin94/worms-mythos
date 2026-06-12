@@ -34,6 +34,7 @@ class UI:
         self._hover_prev = None
         self.t = 0
         self.win_size = None    # set by App in GPU mode (no display surface)
+        self._panel_fill = {}   # cached translucent panel fills, per size
 
     def begin(self, events):
         self.t += 1
@@ -186,8 +187,11 @@ class UI:
 
     def panel(self, surf, rect, title=None):
         rect = pygame.Rect(rect)
-        p = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
-        p.fill((10, 8, 7, 232))
+        p = self._panel_fill.get(rect.size)
+        if p is None:
+            p = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+            p.fill((10, 8, 7, 232))
+            self._panel_fill[rect.size] = p
         surf.blit(p, rect.topleft)
         pygame.draw.rect(surf, EDGE, rect, 1)
         # double-line top edge with corner ticks

@@ -84,6 +84,8 @@ class CRT:
         self._warp_x = self._warp_y = None
         self._hal = pygame.Surface((self.vw, self.vh))
         self._wide2 = pygame.Surface((self.vw, GRID_H))  # sharp, pre-rows
+        self._blo = None               # bright-pass upscale, view-sized
+        self._shine_r = None           # bounding rect of the shine ellipse
         self._ren = None               # GPU chain (attach_gpu), else CPU
         self._win = None
         self._gpu_built_for = None
@@ -263,6 +265,15 @@ class CRT:
         pygame.draw.ellipse(shine, (int(6 + 6 * vign_s),) * 3,
                             (-w * 0.2, -h * 0.75, w * 1.4, h * 1.1))
         self._shine = shine
+        # the ellipse only covers the upper band of the screen; adding the
+        # zero rows below is a no-op, so present() blits just this rect
+        nz = pygame.surfarray.array3d(shine).any(axis=2)
+        sxs = np.flatnonzero(nz.any(axis=1))
+        sys_ = np.flatnonzero(nz.any(axis=0))
+        self._shine_r = (pygame.Rect(int(sxs[0]), int(sys_[0]),
+                                     int(sxs[-1] - sxs[0]) + 1,
+                                     int(sys_[-1] - sys_[0]) + 1)
+                         if len(sxs) else None)
         self._build_warp(float(s.get("crt_curve", 0.0)))
 
     def _build_warp(self, curve=0.5):
@@ -282,6 +293,32 @@ class CRT:
     @staticmethod
     def _ramp(v, a, b):
         return min(1.0, max(0.0, (v - a) / (b - a)))
+
+    def _brightpass_up(self, q):
+        """Upscale the bright-pass to view res and return it with the
+        bounding box of its lit pixels (with margin for the bilinear filter
+        support). Outside the box the upscale is exactly zero and adding
+        zero is a no-op — so the ADD blits and the halation upscale (often
+        most of the frame) shrink to the box, or vanish on dark frames."""
+        sw, sh = q.get_size()
+        qa = pygame.surfarray.pixels3d(q)
+        xs = np.flatnonzero(qa.any(axis=(1, 2)))
+        if not len(xs):
+            return None, None                 # nothing bright this frame
+        ys = np.flatnonzero(qa.any(axis=(0, 2)))
+        del qa
+        x0 = max(0, int(xs[0]) - 2)
+        x1 = min(sw, int(xs[-1]) + 3)
+        y0 = max(0, int(ys[0]) - 2)
+        y1 = min(sh, int(ys[-1]) + 3)
+        bx = x0 * GRID_W // sw
+        bx1 = min(GRID_W, -((x1 * -GRID_W) // sw))
+        by = y0 * GRID_H // sh
+        by1 = min(GRID_H, -((y1 * -GRID_H) // sh))
+        if self._blo is None:
+            self._blo = pygame.Surface((GRID_W, GRID_H))
+        pygame.transform.smoothscale(q, (GRID_W, GRID_H), self._blo)
+        return self._blo, pygame.Rect(bx, by, bx1 - bx, by1 - by)
 
     def present(self, view, screen):
         s = self.settings
@@ -327,7 +364,7 @@ class CRT:
             del arr
 
         # bright-pass for bloom + halation, at low res
-        blo = q = None
+        blo = q = blo_r = None
         if bloom_amt > 0.05:
             q = pygame.transform.smoothscale(view, (GRID_W // 4, GRID_H // 4))
             qa = pygame.surfarray.pixels3d(q)
@@ -338,9 +375,13 @@ class CRT:
             qa[:] = tmp.astype(np.uint8)
             del qa
             q = pygame.transform.smoothscale(q, (GRID_W // 8, GRID_H // 8))
-            blo = pygame.transform.smoothscale(q, (GRID_W, GRID_H))
-            blo.set_alpha(int(150 * bloom_amt))
-            view.blit(blo, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
+            blo, blo_r = self._brightpass_up(q)
+            if blo is None:
+                q = None
+            else:
+                blo.set_alpha(int(150 * bloom_amt))
+                view.blit(blo, blo_r.topleft, area=blo_r,
+                          special_flags=pygame.BLEND_RGB_ADD)
 
         # barrel curvature: real per-pixel remap (costs ~2.5 ms when on)
         if float(s.get("crt_curve", 0.0)) > 0.05:
@@ -381,16 +422,23 @@ class CRT:
         # bright areas (reads as the beam widening on hot pixels)
         hal = float(s.get("crt_halation", 0.6))
         if blo is not None and hal > 0.03:
-            pygame.transform.scale(blo, (self.vw, self.vh), self._hal)
+            sc = self.scale
+            big_r = pygame.Rect(blo_r.x * sc, blo_r.y * sc,
+                                blo_r.w * sc, blo_r.h * sc)
+            pygame.transform.scale(blo.subsurface(blo_r), big_r.size,
+                                   self._hal.subsurface(big_r))
             self._hal.set_alpha(int((50 + 70 * bloom_amt) * hal))
-            big.blit(self._hal, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
-        if float(s.get("crt_vignette", 0.55)) > 0.05:
-            big.blit(self._shine, (0, 0), special_flags=pygame.BLEND_RGB_ADD)
+            big.blit(self._hal, big_r.topleft, area=big_r,
+                     special_flags=pygame.BLEND_RGB_ADD)
+        if float(s.get("crt_vignette", 0.55)) > 0.05 and self._shine_r:
+            big.blit(self._shine, self._shine_r.topleft, area=self._shine_r,
+                     special_flags=pygame.BLEND_RGB_ADD)
         flick = float(s.get("crt_flicker", 0.3))
         if not s.get("reduce_flash") and flick > 0.03:
             depth = int(9 * flick)
             d = 255 - depth + random.randint(0, depth)
-            big.fill((d, d, d), special_flags=pygame.BLEND_RGB_MULT)
+            if d < 255:        # (v * 255 + 255) >> 8 == v: exact identity
+                big.fill((d, d, d), special_flags=pygame.BLEND_RGB_MULT)
         if not direct:
             pygame.transform.scale(big, (sw, sh), screen)
         return False

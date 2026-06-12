@@ -99,6 +99,18 @@ class PixelFont:
         return (max(0, n * 4 - 1) * self.scale + pad,
                 5 * self.scale + pad)
 
+    @staticmethod
+    def _stamp(surf, text, sc, col, offx, offy):
+        """Fill the glyph pixels of one text layer at the given offset."""
+        for ci, ch in enumerate(text):
+            rows = _G.get(ch, _G["?"])
+            cx = ci * 4 * sc + offx
+            for ry, row in enumerate(rows):
+                for rx, bit in enumerate(row):
+                    if bit == "1":
+                        surf.fill(col, (cx + rx * sc, ry * sc + offy,
+                                        sc, sc))
+
     def render(self, text, a, b=None):
         color = tuple(b if b is not None else a)
         text = str(text).translate(_TRANSLATE).upper()
@@ -112,22 +124,20 @@ class PixelFont:
         h = 5 * sc + pad
         surf = pygame.Surface((w, h), pygame.SRCALPHA)
         if self.outline:
-            layers = [(_SHADOW, (ox, oy)) for ox in (0, 1, 2)
-                      for oy in (0, 1, 2) if (ox, oy) != (1, 1)]
-            layers.append((color, (1, 1)))
+            # stamp the dark layer once, blit it at the 8 ring offsets —
+            # identical pixels to 8 separate stamps, at a fraction of the
+            # cost (glyph pixels are fully opaque, the rest fully clear)
+            mask = pygame.Surface((w, h), pygame.SRCALPHA)
+            self._stamp(mask, text, sc, _SHADOW, 0, 0)
+            for off in ((0, 0), (1, 0), (2, 0), (0, 1), (2, 1),
+                        (0, 2), (1, 2), (2, 2)):
+                surf.blit(mask, off)
+            self._stamp(surf, text, sc, color, 1, 1)
         elif self.shadow:
-            layers = [(_SHADOW, (sc, sc)), (color, (0, 0))]
+            self._stamp(surf, text, sc, _SHADOW, sc, sc)
+            self._stamp(surf, text, sc, color, 0, 0)
         else:
-            layers = [(color, (0, 0))]
-        for col, (offx, offy) in layers:
-            for ci, ch in enumerate(text):
-                rows = _G.get(ch, _G["?"])
-                cx = ci * 4 * sc + offx
-                for ry, row in enumerate(rows):
-                    for rx, bit in enumerate(row):
-                        if bit == "1":
-                            surf.fill(col, (cx + rx * sc, ry * sc + offy,
-                                            sc, sc))
+            self._stamp(surf, text, sc, color, 0, 0)
         if len(self._cache) > 3000:
             self._cache.clear()
         self._cache[key] = surf
