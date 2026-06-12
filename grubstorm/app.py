@@ -1253,7 +1253,14 @@ class App:
     def run(self):
         while self.running:
             cap = int(self.settings.get("fps_cap", 144))
-            dt = self.clock.tick(cap) / 1000.0
+            # busy-loop pacing above 100 fps: SDL_Delay's ~1ms granularity
+            # jitters 7ms frames visibly; the busy wait costs idle CPU but
+            # delivers even frame spacing, which the eye cares about more
+            # than raw fps
+            if cap >= 100:
+                dt = self.clock.tick_busy_loop(cap) / 1000.0
+            else:
+                dt = self.clock.tick(cap) / 1000.0
             # fixed-timestep accumulator: sim always runs at 60 Hz
             self._acc += dt
             self.sim_steps = 0
