@@ -221,6 +221,7 @@ class SandboxScreen:
         self.panel = True              # TAB hides the lab kit
         self.tool = "paint"            # paint | grub | crate/... | boom | fire
         self._hover_name = ""
+        self._stroke = None            # last painted point for interpolation
 
         class _LabSpec:
             light = 0.85
@@ -257,6 +258,24 @@ class SandboxScreen:
         ang = math.atan2(ty - g.y, tx - g.x)
         spec.fire_fn(self.rig, g, ang, 0.75, (int(tx), int(ty)))
         self.app.audio.play("shoot", 0.5)
+
+    def _stroke_to(self, x, y, mat):
+        """Paint a continuous stroke: interpolate from the last painted
+        point so a fast-moving brush leaves a line, not dotted gaps
+        (painting only happens on sim ticks, the mouse moves between)."""
+        mode = "replace" if mat != M.EMPTY else "erase"
+        if self._stroke is None:
+            pts = [(x, y)]
+        else:
+            x0, y0 = self._stroke
+            dist = max(abs(x - x0), abs(y - y0))
+            step = max(1.0, self.brush * 0.5)
+            n = max(1, int(dist / step))
+            pts = [(x0 + (x - x0) * i / n, y0 + (y - y0) * i / n)
+                   for i in range(1, n + 1)]
+        self._stroke = (x, y)
+        for px, py in pts:
+            self.world.paint(px, py, self.brush, mat, mode=mode)
 
     def _save(self):
         self.save_n += 1
@@ -330,13 +349,13 @@ class SandboxScreen:
                         self.tool = "paint"
             elif pygame.mouse.get_pressed()[0] and \
                     (self.app.sim_steps or not self.running):
-                self.world.paint(ui.mx, ui.my, self.brush, self.mat,
-                                 mode="replace" if self.mat != M.EMPTY
-                                 else "erase")
+                self._stroke_to(ui.mx, ui.my, self.mat)
             if pygame.mouse.get_pressed()[2] and \
                     (self.app.sim_steps or not self.running):
-                self.world.paint(ui.mx, ui.my, self.brush, M.EMPTY,
-                                 mode="erase")
+                self._stroke_to(ui.mx, ui.my, M.EMPTY)
+        if not (pygame.mouse.get_pressed()[0] or
+                pygame.mouse.get_pressed()[2]):
+            self._stroke = None
         if self.running:
             keys = pygame.key.get_pressed()
             inp = InputFrame()
