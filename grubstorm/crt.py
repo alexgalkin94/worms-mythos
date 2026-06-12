@@ -83,7 +83,7 @@ class CRT:
         self._slider_t = 0.0
         self._warp_x = self._warp_y = None
         self._hal = pygame.Surface((self.vw, self.vh))
-        self._smear_tmp = pygame.Surface((self.vw, self.vh))
+        self._wide2 = pygame.Surface((self.vw, GRID_H))  # sharp, pre-rows
         self._build_overlays()
 
     # ------------------------------------------------------------- overlays
@@ -243,12 +243,15 @@ class CRT:
         elif smear <= 0.001:
             pygame.transform.scale(view, (self.vw, self.vh), big)
         else:
-            pygame.transform.scale(view, (self.vw, self.vh), big)
+            # crossfade at pre-row-replication width: the vertical scale is
+            # pure row replication, so blending before it is pixel-exact —
+            # and runs on a surface `scale`x smaller than big
+            pygame.transform.scale(view, (self.vw, GRID_H), self._wide2)
             pygame.transform.smoothscale(view, (self.vw, GRID_H), self._wide)
-            pygame.transform.scale(self._wide, (self.vw, self.vh),
-                                   self._smear_tmp)
-            self._smear_tmp.set_alpha(int(255 * smear))
-            big.blit(self._smear_tmp, (0, 0))
+            self._wide.set_alpha(int(255 * smear))
+            self._wide2.blit(self._wide, (0, 0))
+            self._wide.set_alpha(None)
+            pygame.transform.scale(self._wide2, (self.vw, self.vh), big)
 
         big.blit(self._phosphor, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
         # halation: glass-scattered light fills the scanline gaps around
