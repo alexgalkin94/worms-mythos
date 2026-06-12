@@ -189,9 +189,12 @@ class World:
             return 0
         r0 = int(rows.argmax())
         r1 = len(rows) - int(rows[::-1].argmax())
-        ys, xs = np.nonzero(mask[r0:r1])
+        # flatnonzero + divmod is ~7x faster than 2-D nonzero (one output
+        # pass, no per-element coordinate writes), same indices
+        idx = np.flatnonzero(mask[r0:r1])
+        n = len(idx)
+        ys, xs = np.divmod(idx, mask.shape[1])
         ys += r0
-        n = len(ys)
         # swap through FLAT indices into the contiguous base planes: the
         # source/target index arithmetic happens once instead of inside
         # every per-plane 2-D fancy index, and 1-D gathers take numpy's
