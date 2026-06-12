@@ -222,6 +222,7 @@ class SandboxScreen:
         self.tool = "paint"            # paint | grub | crate/... | boom | fire
         self._hover_name = ""
         self._stroke = None            # last painted point for interpolation
+        self._pt1 = None               # anchor for two-point tools
 
         class _LabSpec:
             light = 0.85
@@ -277,6 +278,60 @@ class SandboxScreen:
         for px, py in pts:
             self.world.paint(px, py, self.brush, mat, mode=mode)
 
+    def _do_shape(self, kind, p1, p2):
+        mode = "replace" if self.mat != M.EMPTY else "erase"
+        if kind == "line":
+            self._stroke = None
+            self._stroke_to(p1[0], p1[1], self.mat)
+            self._stroke_to(p2[0], p2[1], self.mat)
+            self._stroke = None
+        else:                                    # rect
+            x0, x1 = sorted((int(p1[0]), int(p2[0])))
+            y0, y1 = sorted((int(p1[1]), int(p2[1])))
+            x0 = max(1, x0); y0 = max(1, y0)
+            x1 = min(self.world.w - 2, x1); y1 = min(self.world.h - 2, y1)
+            sub = self.world.mat[y0:y1 + 1, x0:x1 + 1]
+            ok = sub != M.BEDROCK
+            sub[ok] = M.EMPTY if mode == "erase" else self.mat
+            self.world.shade[y0:y1 + 1, x0:x1 + 1][ok] = \
+                self.world.tex[y0:y1 + 1, x0:x1 + 1][ok]
+            self.world.life[y0:y1 + 1, x0:x1 + 1][ok] = 0
+            self.world.burn[y0:y1 + 1, x0:x1 + 1][ok] = 0
+            self.world.rest[y0:y1 + 1, x0:x1 + 1] = 0
+            self.world.wake(x0 - 1, y0 - 1, x1 + 1, y1 + 1)
+
+    def _flood(self, x, y):
+        """Bucket fill: flood the enclosed air pocket under the cursor."""
+        import numpy as np
+        w = self.world
+        if self.mat == M.EMPTY:
+            self._flash("pick a material to fill with")
+            return
+        open_ = (M.PHASE[w.mat] == M.P_EMPTY) | (M.PHASE[w.mat] == M.P_GAS)
+        xi, yi = int(x), int(y)
+        if not (0 <= xi < w.w and 0 <= yi < w.h) or not open_[yi, xi]:
+            return
+        mask = np.zeros_like(open_)
+        mask[yi, xi] = True
+        for _ in range(600):
+            grow = mask.copy()
+            grow[1:] |= mask[:-1]
+            grow[:-1] |= mask[1:]
+            grow[:, 1:] |= mask[:, :-1]
+            grow[:, :-1] |= mask[:, 1:]
+            grow &= open_
+            if (grow == mask).all():
+                break
+            mask = grow
+        w.mat[mask] = self.mat
+        w.shade[mask] = w.tex[mask]
+        w.life[mask] = 0
+        w.burn[mask] = 0
+        w.rest[mask] = 0
+        ys, xs = np.nonzero(mask)
+        w.wake(int(xs.min()) - 1, int(ys.min()) - 1,
+               int(xs.max()) + 1, int(ys.max()) + 1)
+
     def _save(self):
         self.save_n += 1
         save_map(self.world, f"lab_{self.save_n:03d}")
@@ -301,7 +356,9 @@ class SandboxScreen:
         for e in events:
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
-                    if self.tool != "paint":
+                    if self._pt1 is not None:
+                        self._pt1 = None
+                    elif self.tool != "paint":
                         self.tool = "paint"
                     else:
                         from .app import MainMenu
@@ -340,7 +397,18 @@ class SandboxScreen:
         # sim ticks, not render frames — at 144 fps a frame-rate brush fed
         # the world 2.4x the material and the lag to match
         if not self._over_panel(ui):
-            if self.tool != "paint":
+            if self.tool in ("line", "rect"):
+                if ui.clicked:
+                    if self._pt1 is None:
+                        self._pt1 = (ui.mx, ui.my)
+                    else:
+                        self._do_shape(self.tool, self._pt1,
+                                       (ui.mx, ui.my))
+                        self._pt1 = None
+            elif self.tool == "fill":
+                if ui.clicked:
+                    self._flood(ui.mx, ui.my)
+            elif self.tool != "paint":
                 if ui.clicked:
                     self._spawn_at(self.tool, ui.mx, ui.my)
                     if self.tool in ("boom", "fire"):
@@ -410,6 +478,24 @@ class SandboxScreen:
         if self.tool == "paint":
             pygame.draw.circle(view, (255, 255, 255), (ui.mx, ui.my),
                                self.brush, 1)
+        elif self.tool in ("line", "rect"):
+            if self._pt1 is not None:
+                if self.tool == "line":
+                    pygame.draw.line(view, ACCENT, self._pt1,
+                                     (ui.mx, ui.my), 1)
+                else:
+                    x0, x1 = sorted((self._pt1[0], ui.mx))
+                    y0, y1 = sorted((self._pt1[1], ui.my))
+                    pygame.draw.rect(view, ACCENT,
+                                     (x0, y0, x1 - x0 + 1, y1 - y0 + 1), 1)
+            pygame.draw.line(view, (255, 255, 255), (ui.mx - 2, ui.my),
+                             (ui.mx + 2, ui.my))
+            pygame.draw.line(view, (255, 255, 255), (ui.mx, ui.my - 2),
+                             (ui.mx, ui.my + 2))
+        elif self.tool == "fill":
+            pygame.draw.rect(view, ACCENT, (ui.mx - 2, ui.my - 1, 5, 4), 1)
+            pygame.draw.line(view, ACCENT, (ui.mx, ui.my - 3),
+                             (ui.mx + 2, ui.my - 1))
         elif self.tool == "boom":
             pygame.draw.circle(view, (255, 120, 60), (ui.mx, ui.my), 14, 1)
             pygame.draw.line(view, (255, 120, 60), (ui.mx - 3, ui.my),
@@ -484,7 +570,20 @@ class SandboxScreen:
         name = hover_name or (M.NAMES[self.mat] if self.mat else "Eraser")
         ui.label(view, x0 + PANEL_W // 2, y, name, FG, ui.font, center=True)
         y += 9
-        # eraser + brush row
+        # ---- tools, Photoshop style ----
+        ui.label(view, x0 + 8, y, "TOOLS", DIM, ui.font)
+        y += 8
+        for i, (lbl, tid, hint) in enumerate((
+                ("BRUSH", "paint", "Freehand painting. Hold LMB."),
+                ("LINE", "line", "Two clicks: start, end."),
+                ("RECT", "rect", "Two clicks: opposite corners."),
+                ("FILL", "fill", "Click a cave: floods the pocket."))):
+            bx = x0 + 8 + (i % 4) * 25
+            if self._btn(view, ui, (bx, y, 23, 11), lbl[:4], hint,
+                         accent=(self.tool == tid)):
+                self.tool = tid
+                self._pt1 = None
+        y += 14
         if self._btn(view, ui, (x0 + 8, y, 42, 11), "ERASE",
                      "Paint nothing. RMB erases anywhere.",
                      accent=(self.mat == M.EMPTY and self.tool == "paint")):
@@ -560,8 +659,7 @@ class SandboxScreen:
             if line:
                 ui.label(view, x0 + 8, y, line, FG, ui.font)
         else:
-            for line in ("LMB paint  RMB erase", "MMB pick  wheel brush",
-                         "TAB hide panel"):
+            for line in ("MMB pick  wheel brush",):
                 ui.label(view, x0 + 8, y, line, DIM, ui.font)
                 y += 8
 
