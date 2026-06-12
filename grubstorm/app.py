@@ -684,6 +684,30 @@ class OptionsScreen(Screen):
         ("crt_curve", "Curvature"), ("bloom", "Bloom"),
     ]
 
+    # one-line "what does this actually look like" per dial
+    HINTS = {
+        "crt_smear": "Sideways blur that melts hard pixels together.",
+        "crt_scanline": "Dark horizontal lines between picture rows.",
+        "crt_mask": "Fine phosphor dot grid over the whole image.",
+        "crt_fringe": "Red/blue ghost edges on hard contrasts.",
+        "crt_halation": "Bright spots glow softly into the glass.",
+        "crt_persist": "Moving lights leave fading trails (ghosting).",
+        "crt_flicker": "Gentle brightness shimmer, like mains hum.",
+        "crt_vignette": "Darkens the corners of the screen.",
+        "crt_curve": "Bends the image like curved tube glass.",
+        "bloom": "Bright pixels bleed light outward.",
+        "preset": "Pre-mixed looks - pick one, then fine-tune below.",
+        "shake": "Camera kick on explosions and impacts.",
+        "reduce_flash": "Kills flashes, flicker and phosphor trails.",
+        "colorblind": "Alternative team colors, easier to tell apart.",
+        "fullscreen": "Borderless fullscreen on / windowed off.",
+        "show_fps": "Tiny frame counter in the corner.",
+        "fps_cap": "Render speed limit. Sim always runs at 60.",
+        "render_scale": "Window size when not fullscreen.",
+        "volume": "Loudness of effects: booms, splats, clicks.",
+        "music": "Loudness of the soundtrack.",
+    }
+
     def __init__(self, app, back_fn=None, bg_game=None):
         super().__init__(app)
         self.back_fn = back_fn or (lambda: app.goto(MainMenu(app)))
@@ -703,8 +727,13 @@ class OptionsScreen(Screen):
                 return name
         return None
 
+    def _hover_hint(self, key, rect):
+        if self.app.ui._hover(pygame.Rect(rect)):
+            self._hint = self.HINTS.get(key)
+
     # continuous 0–100 slider over any numeric setting
     def _pct(self, view, rect, label, key, lo=0.0, hi=1.0, locked=False):
+        self._hover_hint(key, rect)
         ui, s = self.app.ui, self.app.settings
         try:
             val = float(s.get(key, lo))
@@ -733,6 +762,7 @@ class OptionsScreen(Screen):
                 save_settings(s)
             tx += wbtn + 5
         y0 = 44
+        self._hint = None
         if self.tab == "CRT":
             self._draw_crt_tab(view, y0)
         elif self.tab == "VIDEO":
@@ -741,6 +771,10 @@ class OptionsScreen(Screen):
             self._draw_audio_tab(view, y0)
         else:
             self._draw_gameplay_tab(view, y0)
+        # what-does-this-do line for whatever the mouse is over
+        ui.label(view, 16, GRID_H - 34,
+                 self._hint or "Hover a control to see what it changes.",
+                 FG if self._hint else DIM, ui.font)
         if ui.button(view, (GRID_W // 2 - 40, GRID_H - 22, 80, 14), "BACK"):
             save_settings(s)
             self.back_fn()
@@ -754,6 +788,7 @@ class OptionsScreen(Screen):
         ui.label(view, lx, y0, "PRESET", DIM, ui.font)
         active = self._preset_name() or "CUSTOM"
         dd_rect = pygame.Rect(lx, y0 + 9, 104, 13)
+        self._hover_hint("preset", dd_rect)
         if ui.button(view, dd_rect, f"{active}  {'^' if self.preset_open else 'v'}",
                      accent=True, font=ui.font):
             self.preset_open = not self.preset_open
@@ -787,6 +822,8 @@ class OptionsScreen(Screen):
         app, ui = self.app, self.app.ui
         s = app.settings
         lx, rx = 16, 132
+        self._hover_hint("fullscreen", (lx, y0, 104, 13))
+        self._hover_hint("show_fps", (rx, y0, 104, 13))
         fs = ui.toggle(view, (lx, y0, 104, 13), "Fullscreen", s["fullscreen"])
         if fs != s["fullscreen"]:
             s["fullscreen"] = fs
@@ -794,6 +831,8 @@ class OptionsScreen(Screen):
         s["show_fps"] = ui.toggle(view, (rx, y0, 104, 13), "Show FPS",
                                   s["show_fps"])
         y = y0 + 26
+        self._hover_hint("fps_cap", (lx, y, 104, 22))
+        self._hover_hint("render_scale", (rx, y, 104, 22))
         cap = int(s.get("fps_cap", 144))
         ui.selector(view, (lx, y, 104, 22), "FPS CAP",
                     "Uncapped" if cap == 0 else f"{cap} fps",
@@ -814,6 +853,8 @@ class OptionsScreen(Screen):
         ui, s = self.app.ui, self.app.settings
         self._pct(view, (16, y0 + 6, 130, 18), "Screen shake", "shake",
                   0.0, 2.0)
+        self._hover_hint("reduce_flash", (16, y0 + 34, 130, 13))
+        self._hover_hint("colorblind", (16, y0 + 52, 130, 13))
         s["reduce_flash"] = ui.toggle(view, (16, y0 + 34, 130, 13),
                                       "Reduce flashing", s["reduce_flash"])
         s["colorblind"] = ui.toggle(view, (16, y0 + 52, 130, 13),

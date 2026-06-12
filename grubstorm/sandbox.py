@@ -163,11 +163,45 @@ def load_map_into(world, path):
 
 
 PANEL_W = 112          # right-hand lab kit panel
-SPAWN_TOOLS = [        # (label, tool id, hotkey hint)
-    ("GRUB", "grub", "G"), ("BOOM", "boom", "E"),
-    ("CRATE", "crate", "K"), ("PLANK", "plank", ""),
-    ("BLOCK", "block", ""), ("BEAM", "beam", ""),
+SPAWN_TOOLS = [        # (label, tool id, hint)
+    ("GRUB", "grub", "Drop a test worm. A/D walk, SPACE jump. (G)"),
+    ("BOOM", "boom", "Explosion at your click. Stays armed. (E)"),
+    ("CRATE", "crate", "Wooden box prop. Floats and burns. (K)"),
+    ("PLANK", "plank", "Light wooden plank. Floats, burns."),
+    ("BLOCK", "block", "Heavy stone block. Sinks, shrugs off hits."),
+    ("BEAM", "beam", "Metal beam. Very heavy, fireproof."),
 ]
+
+# what-is-this line per material, shown at the panel bottom on hover
+MAT_HINTS = {
+    M.STONE: "Solid rock. Blastable.",
+    M.DIRT: "Soft solid. Digs and blasts easily.",
+    M.METAL: "Hard. Conducts electricity.",
+    M.WOOD: "Solid fuel. Burns long.",
+    M.ICE: "Slippery. Melts near heat.",
+    M.GLASS: "Brittle. Shatters.",
+    M.GRASS: "Catches fire fast.",
+    M.CRYSTAL: "Glows in the dark. Brittle.",
+    M.SAND: "Powder. Flows into flat cones.",
+    M.GRAVEL: "Chunky powder. Sluggish.",
+    M.SNOW: "Fluffy. Holds steep drifts. Melts.",
+    M.ASH: "Clumpy burnt powder.",
+    M.EXPOWDER: "EXPLOSIVE. Chain-detonates.",
+    M.WATER: "Levels out. Conducts zaps. Douses fire.",
+    M.OIL: "Floats on water. Very flammable.",
+    M.ACID: "Dissolves terrain. Toxic puffs.",
+    M.LAVA: "Melts and ignites. Water turns it to stone.",
+    M.SLUDGE: "Toxic goo. Poisons worms.",
+    M.SLIME: "Sticky gel. Clings to walls.",
+    M.MAGIC: "Chaos liquid. Anything goes.",
+    M.NITRO: "Liquid explosive. Sneeze and it booms.",
+    M.NAPALM: "Sticky fire gel. Coats, then burns.",
+    M.GAS: "Rises. Explodes at a spark.",
+    M.TOXGAS: "Poison cloud.",
+    M.SMOKE: "Drifts up and fades.",
+    M.STEAM: "Hot mist. Cools into water.",
+    M.FIRE: "Burns whatever can burn.",
+}
 
 
 class SandboxScreen:
@@ -386,11 +420,17 @@ class SandboxScreen:
             ui.label(view, (GRID_W - (PANEL_W if self.panel else 0)) // 2, 18,
                      self.msg, ACCENT2, ui.font_m, center=True)
 
+    def _btn(self, view, ui, rect, label, hint, **kw):
+        if ui._hover(pygame.Rect(rect)):
+            self._hint = hint
+        return ui.button(view, rect, label, font=ui.font, **kw)
+
     def _draw_panel(self, view, ui):
         x0 = GRID_W - PANEL_W
         ui.panel(view, (x0, 0, PANEL_W, GRID_H), None)
         ui.label(view, x0 + PANEL_W // 2, 4, "LAB KIT", ACCENT, ui.font_m,
                  center=True)
+        self._hint = None
         y = 16
         # ---- materials, grouped, with a fixed name line (no flicker) ----
         hover_name = None
@@ -409,6 +449,7 @@ class SandboxScreen:
                                          r2.inflate(2, 2), 1)
                     if r2.collidepoint(ui.mx, ui.my):
                         hover_name = M.NAMES[m]
+                        self._hint = MAT_HINTS.get(m)
                         pygame.draw.rect(view, ACCENT, r2.inflate(2, 2), 1)
                         if ui.clicked:
                             self.mat = m
@@ -421,25 +462,27 @@ class SandboxScreen:
         ui.label(view, x0 + PANEL_W // 2, y, name, FG, ui.font, center=True)
         y += 9
         # eraser + brush row
-        if ui.button(view, (x0 + 8, y, 42, 11), "ERASE",
-                     accent=(self.mat == M.EMPTY and self.tool == "paint"),
-                     font=ui.font):
+        if self._btn(view, ui, (x0 + 8, y, 42, 11), "ERASE",
+                     "Paint nothing. RMB erases anywhere.",
+                     accent=(self.mat == M.EMPTY and self.tool == "paint")):
             self.mat = M.EMPTY
             self.tool = "paint"
-        if ui.button(view, (x0 + 54, y, 13, 11), "-", font=ui.font):
+        if self._btn(view, ui, (x0 + 54, y, 13, 11), "-",
+                     "Brush size. Or roll the mouse wheel."):
             self.brush = max(1, self.brush - 2)
         ui.label(view, x0 + 71, y + 3, f"{self.brush:2d}", FG, ui.font)
-        if ui.button(view, (x0 + 86, y, 13, 11), "+", font=ui.font):
+        if self._btn(view, ui, (x0 + 86, y, 13, 11), "+",
+                     "Brush size. Or roll the mouse wheel."):
             self.brush = min(25, self.brush + 2)
         y += 15
         # ---- spawn tools (click arms the stamp, click world to drop) ----
         ui.label(view, x0 + 8, y, "DROP INTO THE WORLD", DIM, ui.font)
         y += 8
-        for i, (label, tool, key) in enumerate(SPAWN_TOOLS):
+        for i, (label, tool, hint) in enumerate(SPAWN_TOOLS):
             bx = x0 + 8 + (i % 3) * 33
             by = y + (i // 3) * 14
-            if ui.button(view, (bx, by, 31, 11), label,
-                         accent=(self.tool == tool), font=ui.font):
+            if self._btn(view, ui, (bx, by, 31, 11), label, hint,
+                         accent=(self.tool == tool)):
                 self.tool = tool if self.tool != tool else "paint"
         y += 2 * 14 + 3
         # ---- weapon test rig ----
@@ -448,36 +491,56 @@ class SandboxScreen:
         from .icons import weapon_icon
         ic = weapon_icon(WEAPONS[self.weapon_i].key)
         view.blit(ic, (x0 + 8, y))
-        if ui.button(view, (x0 + 24, y, 12, 11), "<", font=ui.font):
+        if self._btn(view, ui, (x0 + 24, y, 12, 11), "<",
+                     "Previous weapon. (Q)"):
             self.weapon_i = (self.weapon_i - 1) % len(WEAPONS)
-        if ui.button(view, (x0 + 38, y, 12, 11), ">", font=ui.font):
+        if self._btn(view, ui, (x0 + 38, y, 12, 11), ">", "Next weapon."):
             self.weapon_i = (self.weapon_i + 1) % len(WEAPONS)
-        if ui.button(view, (x0 + 54, y, 50, 11), "FIRE F",
-                     accent=(self.tool == "fire"), font=ui.font):
+        if self._btn(view, ui, (x0 + 54, y, 50, 11), "FIRE F",
+                     "Armed: the grub shoots at your click.",
+                     accent=(self.tool == "fire")):
             self.tool = "fire" if self.tool != "fire" else "paint"
         y += 13
         ui.label(view, x0 + 8, y, WEAPONS[self.weapon_i].name, ACCENT,
                  ui.font)
         y += 11
         # ---- world actions ----
-        if ui.button(view, (x0 + 8, y, 46, 11),
+        if self._btn(view, ui, (x0 + 8, y, 46, 11),
                      "RUN P" if not self.running else "PAUSE P",
-                     accent=not self.running, font=ui.font):
+                     "Freeze / resume the simulation.",
+                     accent=not self.running):
             self.running = not self.running
-        if ui.button(view, (x0 + 58, y, 46, 11), "CLEAR C", font=ui.font):
+        if self._btn(view, ui, (x0 + 58, y, 46, 11), "CLEAR C",
+                     "Wipe the world and all actors."):
             self._clear()
         y += 14
-        if ui.button(view, (x0 + 8, y, 46, 11), "SAVE O", accent=True,
-                     font=ui.font):
+        if self._btn(view, ui, (x0 + 8, y, 46, 11), "SAVE O",
+                     "Save as a map. Playable in match setup!",
+                     accent=True):
             self._save()
-        if ui.button(view, (x0 + 58, y, 46, 11), "MENU", font=ui.font):
+        if self._btn(view, ui, (x0 + 58, y, 46, 11), "MENU",
+                     "Back to the main menu. (ESC)"):
             from .app import MainMenu
             self.app.goto(MainMenu(self.app))
         y += 15
-        for line in ("LMB paint  RMB erase  MMB pick",
-                     "wheel brush  TAB hide panel"):
-            ui.label(view, x0 + 8, y, line, DIM, ui.font)
-            y += 8
+        # hint area: explains whatever the mouse is over, else the basics
+        if self._hint:
+            words = self._hint.split()
+            line = ""
+            for wd in words:
+                if len(line) + len(wd) + 1 > 24 and line:
+                    ui.label(view, x0 + 8, y, line, FG, ui.font)
+                    y += 8
+                    line = wd
+                else:
+                    line = f"{line} {wd}".strip()
+            if line:
+                ui.label(view, x0 + 8, y, line, FG, ui.font)
+        else:
+            for line in ("LMB paint  RMB erase", "MMB pick  wheel brush",
+                         "TAB hide panel"):
+                ui.label(view, x0 + 8, y, line, DIM, ui.font)
+                y += 8
 
     def _draw_ps(self, view, ps):
         for i in ps.live_indices():
