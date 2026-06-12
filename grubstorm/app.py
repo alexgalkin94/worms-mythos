@@ -11,7 +11,7 @@ from .constants import (GRID_W, GRID_H, TEAM_COLORS, TEAM_NAME_POOL,
 from .game import Game, InputFrame
 from .ai import Bot
 from .render import Renderer
-from .crt import CRT, CRT_PRESETS, migrate_crt_settings
+from .crt import CRT, CRT_PRESETS, CRT_PARAMS, migrate_crt_settings
 from .audio import Audio
 from .ui import UI, ACCENT, ACCENT2, FG, DIM
 from .mapgen import BIOMES, BIOME_LABELS
@@ -48,6 +48,36 @@ def load_settings():
     except Exception:
         pass
     migrate_crt_settings(s)
+    # sanitize: a hand-edited or stale settings file must never be able to
+    # crash a slider or the CRT pipeline. Coerce types, kill NaN/inf, clamp.
+    def _num(key, lo, hi, default):
+        try:
+            x = float(s.get(key, default))
+        except (TypeError, ValueError):
+            x = float(default)
+        if x != x or x in (float("inf"), float("-inf")):
+            x = float(default)
+        s[key] = min(hi, max(lo, x))
+    for k in CRT_PARAMS:
+        _num(k, 0.0, 1.0, DEFAULT_SETTINGS.get(k, 0.0))
+    _num("bloom", 0.0, 1.0, DEFAULT_SETTINGS.get("bloom", 0.3))
+    _num("shake", 0.0, 2.0, 1.0)
+    _num("volume", 0.0, 1.0, 0.8)
+    _num("music", 0.0, 1.0, 0.6)
+    for k in ("reduce_flash", "colorblind", "fullscreen", "show_fps"):
+        s[k] = bool(s.get(k, DEFAULT_SETTINGS[k]))
+    try:
+        s["fps_cap"] = int(s.get("fps_cap", 144))
+    except (TypeError, ValueError):
+        s["fps_cap"] = 144
+    if s["fps_cap"] not in FPS_CAPS:
+        s["fps_cap"] = 144
+    try:
+        s["render_scale"] = int(s.get("render_scale", 3))
+    except (TypeError, ValueError):
+        s["render_scale"] = 3
+    if s["render_scale"] not in (2, 3, 4):
+        s["render_scale"] = 3
     return s
 
 
@@ -639,11 +669,14 @@ class ResultsScreen(Screen):
 
 
 class OptionsScreen(Screen):
-    """Full shader control: presets on top, every tube parameter on its
-    own slider, live preview of whatever runs behind it (the menu demo,
-    or — entered from pause — your actual match)."""
+    """Modern tabbed options. The CRT tab pairs every tube parameter with
+    a live preview pane — a worm sprinting around with bright sparks — so
+    smear, phosphor trails and halation can actually be judged while you
+    drag the slider. All sliders are continuous 0–100."""
 
-    SLIDERS = [
+    TABS = ["CRT", "VIDEO", "AUDIO", "GAMEPLAY"]
+
+    CRT_SLIDERS = [
         ("crt_smear", "Beam smear"), ("crt_scanline", "Scanlines"),
         ("crt_mask", "Slot mask"), ("crt_fringe", "Color fringe"),
         ("crt_halation", "Halation"), ("crt_persist", "Phosphor trail"),
@@ -655,6 +688,9 @@ class OptionsScreen(Screen):
         super().__init__(app)
         self.back_fn = back_fn or (lambda: app.goto(MainMenu(app)))
         self.bg_game = bg_game
+        self.tab = "CRT"
+        self.preset_open = False
+        self._pt = 0                       # preview animation clock
 
     def update(self, events):
         if self.bg_game is None:
@@ -667,70 +703,171 @@ class OptionsScreen(Screen):
                 return name
         return None
 
+    # continuous 0–100 slider over any numeric setting
+    def _pct(self, view, rect, label, key, lo=0.0, hi=1.0, locked=False):
+        ui, s = self.app.ui, self.app.settings
+        try:
+            val = float(s.get(key, lo))
+        except (TypeError, ValueError):
+            val = lo
+        val = min(hi, max(lo, val))
+        pct = (val - lo) / (hi - lo) * 100.0
+        nv = ui.slider(view, rect, f"{label}: {pct:.0f}", val, lo, hi)
+        if not locked:                    # an open dropdown overlays these
+            s[key] = round(min(hi, max(lo, nv)), 3)
+
     def draw(self, view):
         app, ui = self.app, self.app.ui
         s = app.settings
         game = self.bg_game or app.demo.game
         app.renderer.render_game(game, hud=False)
         ui.panel(view, (6, 4, GRID_W - 12, GRID_H - 8), "OPTIONS")
-        # ---- left: the tube ----
-        lx = 16
-        ui.label(view, lx, 24, "CRT PRESETS", ACCENT, ui.font)
-        px = lx
-        active = self._preset_name()
-        for name in CRT_PRESETS:
-            wbtn = len(name) * 4 + 10
-            if ui.button(view, (px, 33, wbtn, 12), name,
-                         accent=(name == active), font=ui.font):
-                s.update(CRT_PRESETS[name])
-            px += wbtn + 4
-        ui.label(view, lx, 50, "FINE TUNING", ACCENT, ui.font)
-        sy = 60
-        for i, (key, label) in enumerate(self.SLIDERS):
-            col_x = lx + (i % 2) * 112
-            row_y = sy + (i // 2) * 26
-            val = float(s.get(key, 0.0))
-            s[key] = round(ui.slider(
-                view, (col_x, row_y, 100, 18),
-                f"{label}: {int(val * 100)}%", val), 2)
-        # ---- right: game & audio ----
-        rx = 252
-        ui.label(view, rx, 24, "GAME & AUDIO", ACCENT, ui.font)
-        ry = 36
-        s["shake"] = ui.slider(view, (rx, ry, 100, 18),
-                               f"Screen shake: {int(s['shake'] * 100)}%",
-                               s["shake"], 0, 2)
-        s["volume"] = ui.slider(view, (rx + 112, ry, 100, 18),
-                                f"SFX: {int(s['volume'] * 100)}%",
-                                s["volume"])
-        ry += 26
-        s["music"] = ui.slider(view, (rx, ry, 100, 18),
-                               f"Music: {int(s['music'] * 100)}%",
-                               s["music"])
-        ry += 26
-        s["reduce_flash"] = ui.toggle(view, (rx, ry, 100, 13),
-                                      "Reduce flashing", s["reduce_flash"])
-        s["colorblind"] = ui.toggle(view, (rx + 112, ry, 100, 13),
-                                    "Colorblind colors", s["colorblind"])
-        ry += 17
-        fs = ui.toggle(view, (rx, ry, 100, 13), "Fullscreen", s["fullscreen"])
-        if fs != s["fullscreen"]:
-            s["fullscreen"] = fs
-            app.apply_window()
-        s["show_fps"] = ui.toggle(view, (rx + 112, ry, 100, 13), "Show FPS",
-                                  s["show_fps"])
-        ry += 22
-        cap = int(s.get("fps_cap", 144))
-        ui.selector(view, (rx, ry, 100, 22), "FPS CAP",
-                    "Uncapped" if cap == 0 else f"{cap} fps",
-                    lambda: self._cycle_cap(-1), lambda: self._cycle_cap(1))
-        scale = int(s.get("render_scale", 3))
-        ui.selector(view, (rx + 112, ry, 100, 22), "WINDOW",
-                    f"{GRID_W * scale}x{GRID_H * scale}",
-                    lambda: self._cycle_scale(-1), lambda: self._cycle_scale(1))
+        # ---------------------------------------------------- tab strip
+        tx = 16
+        for name in self.TABS:
+            wbtn = len(name) * 4 + 14
+            if ui.button(view, (tx, 20, wbtn, 13), name,
+                         accent=(name == self.tab), font=ui.font):
+                self.tab = name
+                self.preset_open = False
+                save_settings(s)
+            tx += wbtn + 5
+        y0 = 44
+        if self.tab == "CRT":
+            self._draw_crt_tab(view, y0)
+        elif self.tab == "VIDEO":
+            self._draw_video_tab(view, y0)
+        elif self.tab == "AUDIO":
+            self._draw_audio_tab(view, y0)
+        else:
+            self._draw_gameplay_tab(view, y0)
         if ui.button(view, (GRID_W // 2 - 40, GRID_H - 22, 80, 14), "BACK"):
             save_settings(s)
             self.back_fn()
+
+    # ------------------------------------------------------------- tabs
+    def _draw_crt_tab(self, view, y0):
+        app, ui = self.app, self.app.ui
+        s = app.settings
+        lx = 16
+        # preset dropdown (list drawn last so it overlays the sliders)
+        ui.label(view, lx, y0, "PRESET", DIM, ui.font)
+        active = self._preset_name() or "CUSTOM"
+        dd_rect = pygame.Rect(lx, y0 + 9, 104, 13)
+        if ui.button(view, dd_rect, f"{active}  {'^' if self.preset_open else 'v'}",
+                     accent=True, font=ui.font):
+            self.preset_open = not self.preset_open
+        ui.label(view, lx + 116, y0 + 12,
+                 "every dial below, pre-mixed", DIM, ui.font)
+        sy = y0 + 32
+        for i, (key, label) in enumerate(self.CRT_SLIDERS):
+            col_x = lx + (i % 2) * 112
+            row_y = sy + (i // 2) * 26
+            self._pct(view, (col_x, row_y, 100, 18), label, key,
+                      locked=self.preset_open)
+        # live preview pane
+        self._draw_preview(view, pygame.Rect(252, y0 + 6, 208, 152))
+        ui.label(view, 252 + 104, y0 + 162, "LIVE PREVIEW", DIM, ui.font,
+                 center=True)
+        if self.preset_open:
+            oy = dd_rect.bottom + 1
+            inside = ui._hover(dd_rect)
+            for name in CRT_PRESETS:
+                r = pygame.Rect(dd_rect.x, oy, dd_rect.w, 12)
+                inside = inside or ui._hover(r)
+                if ui.button(view, r, name, accent=(name == active),
+                             font=ui.font):
+                    s.update(CRT_PRESETS[name])
+                    self.preset_open = False
+                oy += 13
+            if ui.clicked and not inside:
+                self.preset_open = False
+
+    def _draw_video_tab(self, view, y0):
+        app, ui = self.app, self.app.ui
+        s = app.settings
+        lx, rx = 16, 132
+        fs = ui.toggle(view, (lx, y0, 104, 13), "Fullscreen", s["fullscreen"])
+        if fs != s["fullscreen"]:
+            s["fullscreen"] = fs
+            app.apply_window()
+        s["show_fps"] = ui.toggle(view, (rx, y0, 104, 13), "Show FPS",
+                                  s["show_fps"])
+        y = y0 + 26
+        cap = int(s.get("fps_cap", 144))
+        ui.selector(view, (lx, y, 104, 22), "FPS CAP",
+                    "Uncapped" if cap == 0 else f"{cap} fps",
+                    lambda: self._cycle_cap(-1), lambda: self._cycle_cap(1))
+        scale = int(s.get("render_scale", 3))
+        ui.selector(view, (rx, y, 104, 22), "WINDOW",
+                    f"{GRID_W * scale}x{GRID_H * scale}",
+                    lambda: self._cycle_scale(-1), lambda: self._cycle_scale(1))
+        ui.label(view, lx, y + 34,
+                 "The CRT tab has its own page of tube dials.", DIM, ui.font)
+
+    def _draw_audio_tab(self, view, y0):
+        view_ = view
+        self._pct(view_, (16, y0 + 6, 130, 18), "SFX volume", "volume")
+        self._pct(view_, (16, y0 + 36, 130, 18), "Music volume", "music")
+
+    def _draw_gameplay_tab(self, view, y0):
+        ui, s = self.app.ui, self.app.settings
+        self._pct(view, (16, y0 + 6, 130, 18), "Screen shake", "shake",
+                  0.0, 2.0)
+        s["reduce_flash"] = ui.toggle(view, (16, y0 + 34, 130, 13),
+                                      "Reduce flashing", s["reduce_flash"])
+        s["colorblind"] = ui.toggle(view, (16, y0 + 52, 130, 13),
+                                    "Colorblind colors", s["colorblind"])
+
+    # ---------------------------------------------------------- preview
+    def _draw_preview(self, view, rect):
+        """A bright worm sprinting in a dark box: motion for judging the
+        phosphor trail and smear, sparks for halation, text and a checker
+        patch for mask/scanline sharpness."""
+        self._pt += 1
+        t = self._pt
+        pygame.draw.rect(view, (10, 9, 12), rect)
+        pygame.draw.rect(view, (94, 80, 56), rect, 1)
+        # checker patch (top-right): pixel sharpness / mask structure
+        for cy in range(6):
+            for cx in range(10):
+                if (cx + cy) % 2:
+                    view.fill((188, 178, 150),
+                              (rect.right - 46 + cx * 4, rect.y + 6 + cy * 4,
+                               4, 4))
+        # bright bar sweeping back and forth: THE ghosting test
+        f = math.sin(t * 0.045)
+        bx = rect.x + 8 + int((f * 0.5 + 0.5) * (rect.w - 20))
+        pygame.draw.rect(view, (235, 238, 248), (bx, rect.y + 8, 3, 40))
+        # readability line
+        s = self.app.ui.font.render("THE QUICK GRUB JUMPS OVER IT", True,
+                                    (224, 210, 178))
+        view.blit(s, (rect.x + 8, rect.y + 56))
+        # sparks on an orbit: halation / bloom
+        for k in range(3):
+            a = t * 0.09 + k * 2.1
+            sx = rect.centerx + math.cos(a) * 34
+            sy = rect.y + 92 + math.sin(a) * 10
+            pygame.draw.circle(view, (255, 240, 180), (sx, sy), 1)
+        # the sprinting worm
+        span = rect.w - 56
+        ph = math.sin(t * 0.022)
+        wx = rect.x + 28 + (ph * 0.5 + 0.5) * span
+        face = 1 if math.cos(t * 0.022) > 0 else -1
+        hop = abs(math.sin(t * 0.13)) * 7
+        wy = rect.bottom - 18 - hop
+        segs = []
+        for i in range(5):
+            sx = wx - face * i * 2.4
+            sy = wy + (4 - i) * 0.5 + math.sin(t * 0.3 + i * 0.9) * 0.9
+            segs.append((sx, sy, 3.0 - i * 0.35))
+        for sx, sy, r in segs:
+            pygame.draw.circle(view, (16, 12, 22), (sx, sy), r + 0.8)
+        for sx, sy, r in segs:
+            pygame.draw.circle(view, (208, 84, 70), (sx, sy), r)
+        hx, hy = segs[0][0], segs[0][1] - 2
+        pygame.draw.rect(view, (250, 250, 252), (hx - 2, hy - 2, 2, 3))
+        pygame.draw.rect(view, (250, 250, 252), (hx + 1, hy - 2, 2, 3))
 
     def _cycle_cap(self, d):
         s = self.app.settings
