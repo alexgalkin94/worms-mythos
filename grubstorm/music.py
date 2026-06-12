@@ -624,6 +624,7 @@ class MusicPlayer:
         self._pending = None       # (mood, Sound) rendered, not yet playing
         self._rendering = None
         self._lock = threading.Lock()
+        self._vol = None           # last applied volume (skip per-frame sets)
 
     def want(self, mood):
         """Ask for a mood; rendering and crossfade happen in the background."""
@@ -668,8 +669,10 @@ class MusicPlayer:
             if self.sound is not None:
                 self.sound.fadeout(1800)
             snd.set_volume(vol)
+            self._vol = vol
             snd.play(loops=-1, fade_ms=2200)
             self.sound = snd
             self.current_mood = mood
-        elif self.sound is not None:
+        elif self.sound is not None and vol != self._vol:
             self.sound.set_volume(vol)
+            self._vol = vol

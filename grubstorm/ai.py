@@ -5,9 +5,13 @@ online play every client computes identical bot behaviour locally.
 """
 import math
 
+from . import materials as M
 from .constants import GRAVITY, WIND_ACCEL
 from .game import Game, InputFrame
+from .grub import solid_at
 from .weapons import WEAPONS, W_BY_KEY
+
+_SOLID = M.SOLID.tolist()    # plain-list lookup for the hot flight loop
 
 PERSONAS = {
     # aim_err (rad), think_quality, chaos, walk, use_supers
@@ -30,18 +34,21 @@ def _simulate_shot(game, x0, y0, angle, power, wind_affected, owner):
     vx = math.cos(angle) * (1.2 + power * 3.4)
     vy = math.sin(angle) * (1.2 + power * 3.4)
     x, y = x0 + math.cos(angle) * 6, y0 + math.sin(angle) * 6 - 1
+    item = w.mat.item                  # bounds guarded by the flight checks
+    xmax, ymax = w.w - 1, w.h - 1
     for _ in range(400):
         vy += GRAVITY * game.gravity_scale
         if wind_affected:
             vx += game.wind * WIND_ACCEL
         sp = math.hypot(vx, vy)
         steps = max(1, int(sp) + 1)
+        sx, sy = vx / steps, vy / steps
         for _ in range(steps):
-            x += vx / steps
-            y += vy / steps
-            if x < 1 or x >= w.w - 1 or y >= w.h - 1:
+            x += sx
+            y += sy
+            if x < 1 or x >= xmax or y >= ymax:
                 return None
-            if y > 0 and w.is_solid(x, y):
+            if y > 0 and _SOLID[item(int(y), int(x))]:
                 return (x, y)
     return None
 
@@ -210,13 +217,13 @@ class Bot:
                 d = 1 if tx > me.x else -1
                 drop = 0
                 for dy in range(28):
-                    if game.world.is_solid(me.x + d * 5, me.y + dy):
+                    if solid_at(game.world, me.x + d * 5, me.y + dy):
                         break
                     drop += 1
                 if drop < 24:
                     inp.right = d > 0
                     inp.left = d < 0
-                    if game.world.is_solid(me.x + d * 4, me.y) and t % 30 < 2:
+                    if solid_at(game.world, me.x + d * 4, me.y) and t % 30 < 2:
                         inp.jump = True
                 else:
                     plan["walk_ticks"] = 0

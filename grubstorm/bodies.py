@@ -9,6 +9,8 @@ its hit points run out it bursts into loose material.
 Deterministic: only game/world RNG, fixed update order, serialized into
 net snapshots.
 """
+import numpy as np
+
 from . import materials as M
 from .constants import GRAVITY
 
@@ -19,6 +21,12 @@ KINDS = {
     "block": (8, 6, M.STONE, 140, 230),
     "beam":  (14, 3, M.METAL, 160, 250),
 }
+
+_NO_CELLS = (np.empty(0, np.intp), np.empty(0, np.intp))
+
+# plain-Python lookup: mat.item() + list beats stacked world.get/is_solid
+# calls on tiny perimeter scans (same values, so bit-identical physics)
+_SOLID = M.SOLID.tolist()
 
 
 class RigidBody:
@@ -33,65 +41,100 @@ class RigidBody:
         self.vx = self.vy = 0.0
         self.alive = True
         self.resting = False
-        self.written = []                         # cells we own right now
+        self.written = _NO_CELLS                  # (xs, ys) we own right now
+        self._box = None                          # bbox of written cells
 
     # ------------------------------------------------------------ cells
-    def _rect_cells(self):
+    def _rect_clip(self, world):
+        """Our rect clipped to the grid: (x0, x1, y0, y1) cell bounds."""
         x0 = int(self.x - self.w / 2)
         y0 = int(self.y - self.h / 2)
-        return [(x0 + i, y0 + j) for j in range(self.h)
-                for i in range(self.w)]
+        return (max(0, x0), min(world.w, x0 + self.w),
+                max(0, y0), min(world.h, y0 + self.h))
+
+    def reclaim(self, world):
+        """Rebuild ownership from the grid (snapshot restore): claim only
+        rect cells that still hold our material."""
+        x0, x1, y0, y1 = self._rect_clip(world)
+        if x0 >= x1 or y0 >= y1:
+            self.written = _NO_CELLS
+            self._box = None
+            return
+        ys, xs = np.nonzero(world.mat[y0:y1, x0:x1] == self.mat)
+        if len(xs):
+            self.written = (xs + x0, ys + y0)
+            self._box = (int(xs.min()) + x0, int(ys.min()) + y0,
+                         int(xs.max()) + x0, int(ys.max()) + y0)
+        else:
+            self.written = _NO_CELLS
+            self._box = None
 
     def erase(self, world):
+        xs, ys = self.written
         changed = 0
-        for (cx, cy) in self.written:
-            if world.in_bounds(cx, cy) and world.mat[cy, cx] == self.mat:
-                if world.burn[cy, cx]:
-                    changed += 1                  # we are on fire
-                world.mat[cy, cx] = M.EMPTY
-                world.burn[cy, cx] = 0
+        if len(xs):
+            own = world.mat[ys, xs] == self.mat
+            n_own = int(np.count_nonzero(own))
+            changed = len(xs) - n_own                       # blasted/melted
+            if n_own == len(xs):
+                ox, oy = xs, ys           # intact: skip the fancy-index copy
             else:
-                changed += 1                      # cell melted/blasted away
-        if self.written:
-            xs = [c[0] for c in self.written]
-            ys = [c[1] for c in self.written]
-            world.wake(min(xs) - 1, min(ys) - 1, max(xs) + 1, max(ys) + 1)
-        self.written = []
+                ox, oy = xs[own], ys[own]
+            if n_own:
+                changed += int(np.count_nonzero(world.burn[oy, ox]))  # on fire
+                world.mat[oy, ox] = M.EMPTY
+                world.burn[oy, ox] = 0
+            bx0, by0, bx1, by1 = self._box
+            world.wake(bx0 - 1, by0 - 1, bx1 + 1, by1 + 1)
+        self.written = _NO_CELLS
+        self._box = None
         if changed:
             self.hp -= changed * 1.5
             self.resting = False
 
     def write(self, world):
-        self.written = []
-        for (cx, cy) in self._rect_cells():
-            if not world.in_bounds(cx, cy):
-                continue
-            m = world.mat[cy, cx]
-            if M.PHASE[m] <= M.P_LIQUID:          # displace fluids & air
-                world.mat[cy, cx] = self.mat
-                world.shade[cy, cx] = world.tex[cy, cx]
-                self.written.append((cx, cy))
-        xs = [c[0] for c in self.written] or [int(self.x)]
-        ys = [c[1] for c in self.written] or [int(self.y)]
-        world.wake(min(xs) - 1, min(ys) - 1, max(xs) + 1, max(ys) + 1)
+        x0, x1, y0, y1 = self._rect_clip(world)
+        xs = ys = None
+        if x0 < x1 and y0 < y1:
+            sub = world.mat[y0:y1, x0:x1]
+            place = M.PHASE[sub] <= M.P_LIQUID    # displace fluids & air
+            pys, pxs = np.nonzero(place)
+            if len(pxs):
+                sub[place] = self.mat
+                world.shade[y0:y1, x0:x1][place] = \
+                    world.tex[y0:y1, x0:x1][place]
+                xs, ys = pxs + x0, pys + y0
+        if xs is None:
+            self.written = _NO_CELLS
+            self._box = None
+            world.wake(int(self.x) - 1, int(self.y) - 1,
+                       int(self.x) + 1, int(self.y) + 1)
+        else:
+            self.written = (xs, ys)
+            self._box = (int(xs.min()), int(ys.min()),
+                         int(xs.max()), int(ys.max()))
+            bx0, by0, bx1, by1 = self._box
+            world.wake(bx0 - 1, by0 - 1, bx1 + 1, by1 + 1)
 
     # ---------------------------------------------------------- physics
     def _solid_below(self, world):
         y = int(self.y + self.h / 2)
         x0 = int(self.x - self.w / 2)
-        hits = 0
-        for i in range(self.w):
-            m = world.get(x0 + i, y)
-            if M.SOLID[m]:
-                hits += 1
+        if 0 <= y < world.h:
+            c0, c1 = max(0, x0), min(world.w, x0 + self.w)
+            hits = self.w - (c1 - c0)             # off-grid reads bedrock
+            if c0 < c1:
+                hits += int(np.count_nonzero(M.SOLID[world.mat[y, c0:c1]]))
+        else:
+            hits = self.w
         return hits >= max(2, self.w // 4)
 
     def _liquid_frac(self, world):
-        cells = self._rect_cells()
-        if not cells:
+        x0, x1, y0, y1 = self._rect_clip(world)
+        if x0 >= x1 or y0 >= y1:
             return 0.0
-        liq = sum(1 for (cx, cy) in cells if world.is_liquid(cx, cy))
-        return liq / len(cells)
+        liq = int(np.count_nonzero(M.LIQUID[world.mat[y0:y1, x0:x1]]))
+        return liq / (self.w * self.h)
 
     def update(self, game):
         if not self.alive:
@@ -105,11 +148,13 @@ class RigidBody:
         # same tick as every other lockstep client
         if self.resting:
             if game.tick % 8 == 0:
-                missing = sum(1 for (cx, cy) in self.written
-                              if not world.in_bounds(cx, cy)
-                              or world.mat[cy, cx] != self.mat)
-                burning = any(world.burn[cy, cx] for (cx, cy) in self.written
-                              if world.in_bounds(cx, cy))
+                xs, ys = self.written
+                if len(xs):
+                    missing = int(len(xs) - np.count_nonzero(
+                        world.mat[ys, xs] == self.mat))
+                    burning = bool(world.burn[ys, xs].any())
+                else:
+                    missing, burning = 0, False
                 if missing:
                     self.hp -= missing * 1.5
                     self.resting = False
@@ -156,23 +201,25 @@ class RigidBody:
             self.vx = self.vy = 0.0
         self.write(world)
         # squash check: nothing left to write means we're inside terrain
-        if len(self.written) < self.w * self.h * 0.3:
+        if len(self.written[0]) < self.w * self.h * 0.3:
             self.hp = 0
         return True
 
     def _blocked(self, world, x, y):
         x0 = int(x - self.w / 2)
         y0 = int(y - self.h / 2)
-        for i in range(self.w):
-            for j in (0, self.h - 1):
-                m = world.get(x0 + i, y0 + j)
-                if M.SOLID[m]:
-                    return True
-        for j in range(self.h):
-            for i in (0, self.w - 1):
-                m = world.get(x0 + i, y0 + j)
-                if M.SOLID[m]:
-                    return True
+        x1, y1 = x0 + self.w, y0 + self.h
+        if x0 < 0 or y0 < 0 or x1 > world.w or y1 > world.h:
+            return True                            # off-grid reads bedrock
+        item = world.mat.item
+        yb = y1 - 1
+        for cx in range(x0, x1):                   # top + bottom edges
+            if _SOLID[item(y0, cx)] or _SOLID[item(yb, cx)]:
+                return True
+        xr = x1 - 1
+        for cy in range(y0, y1):                   # left + right edges
+            if _SOLID[item(cy, x0)] or _SOLID[item(cy, xr)]:
+                return True
         return False
 
     def _shatter(self, game):

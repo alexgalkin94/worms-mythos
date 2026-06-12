@@ -10,6 +10,38 @@ from .constants import (GRAVITY, GRUB_RADIUS, GRUB_WALK_SPEED, GRUB_STEP_UP,
 # body sample offsets for material contact (relative to centre)
 _BODY = [(0, 0), (-2, 0), (2, 0), (0, -2), (0, 2), (-1, -1), (1, 1)]
 
+# plain-Python material tables: list lookups + mat.item() avoid the stacked
+# world.get/is_solid call overhead on the hottest per-tick samples (the
+# values are identical, so behaviour is bit-for-bit the same)
+_SOLID = M.SOLID.tolist()
+_LIQUID = M.LIQUID.tolist()
+_CONTACT_DPS = [float(v) for v in M.CONTACT_DPS]
+_POISONOUS = M.POISONOUS.tolist()
+
+
+def solid_at(world, x, y):
+    """world.is_solid, minus the call stack. Out of bounds reads bedrock."""
+    xi, yi = int(x), int(y)
+    if 0 <= xi < world.w and 0 <= yi < world.h:
+        return _SOLID[world.mat.item(yi, xi)]
+    return True
+
+
+def liquid_at(world, x, y):
+    """world.is_liquid, minus the call stack."""
+    xi, yi = int(x), int(y)
+    if 0 <= xi < world.w and 0 <= yi < world.h:
+        return _LIQUID[world.mat.item(yi, xi)]
+    return False
+
+
+def mat_at(world, x, y):
+    """world.get, minus the call stack."""
+    xi, yi = int(x), int(y)
+    if 0 <= xi < world.w and 0 <= yi < world.h:
+        return world.mat.item(yi, xi)
+    return M.BEDROCK
+
 # speech-bubble one-liners (cosmetic; picked without touching the sim RNG)
 OUCH_QUIPS = ["OUCH!", "OOF!", "MEDIC!", "THAT HURT!", "HEY!", "OW OW OW"]
 GLOAT_QUIPS = ["GOTCHA!", "HEH HEH.", "BYE BYE!", "SO LONG!", "TOO EASY."]
@@ -55,28 +87,39 @@ class Grub:
 
     # ----------------------------------------------------------- collision
     def _solid_at(self, world, x, y):
-        return world.is_solid(x, y)
+        return solid_at(world, x, y)
 
     def collides(self, world, x, y):
         """Body collision: a narrow capsule (2 wide, ~5 tall) instead of a
         fat circle, so the worm fits its own tunnels and doesn't snag on
         every stray pixel."""
+        mat, w, h = world.mat, world.w, world.h
         for dx in (-1.1, 1.1):
             for dy in (-2.4, -0.8, 0.8, 2.4):
-                if self._solid_at(world, x + dx, y + dy):
+                xi, yi = int(x + dx), int(y + dy)
+                if 0 <= xi < w and 0 <= yi < h:
+                    if _SOLID[mat.item(yi, xi)]:
+                        return True
+                else:
                     return True
-        return self._solid_at(world, x, y)
+        return solid_at(world, x, y)
 
     def _embedded(self, world):
         """Grazing one ragged pixel is fine; actual burial is not."""
-        if self._solid_at(world, self.x, self.y):
+        mat, w, h = world.mat, world.w, world.h
+        xi, yi = int(self.x), int(self.y)
+        if not (0 <= xi < w and 0 <= yi < h) or _SOLID[mat.item(yi, xi)]:
             return True
         hits = 0
         for dx in (-1.1, 1.1):
             for dy in (-2.4, -0.8, 0.8, 2.4):
-                if self._solid_at(world, self.x + dx, self.y + dy):
+                xi, yi = int(self.x + dx), int(self.y + dy)
+                if not (0 <= xi < w and 0 <= yi < h) or \
+                        _SOLID[mat.item(yi, xi)]:
                     hits += 1
-        return hits >= 3
+                    if hits >= 3:
+                        return True
+        return False
 
     def resolve_embed(self, world):
         """Buried by sand, debris, ice or a careless girder? Pop out of the
@@ -101,10 +144,10 @@ class Grub:
         return self.collides(world, self.x, self.y + 1)
 
     def head_in_liquid(self, world):
-        return world.is_liquid(self.x, self.y - 2)
+        return liquid_at(world, self.x, self.y - 2)
 
     def material_under(self, world):
-        return world.get(self.x, self.y + GRUB_RADIUS + 1)
+        return mat_at(world, self.x, self.y + GRUB_RADIUS + 1)
 
     # -------------------------------------------------------------- damage
     def hurt(self, dmg, game=None):
@@ -214,11 +257,11 @@ class Grub:
         world = game.world
         ground = self.ground_below(world)
         under = self.material_under(world)
-        in_liquid = world.is_liquid(self.x, self.y)
+        in_liquid = liquid_at(world, self.x, self.y)
 
         # friction / control
         slippery = under == M.ICE
-        sticky = under == M.SLIME or world.get(self.x, self.y) == M.SLIME
+        sticky = under == M.SLIME or mat_at(world, self.x, self.y) == M.SLIME
 
         if ground and abs(self.vy) < 1.2:
             if self.flying and abs(self.vx) < 0.4:
@@ -395,14 +438,19 @@ class Grub:
         # contact damage from materials touching the body
         worst = 0.0
         poisoned = False
+        mat, w, h = world.mat, world.w, world.h
         for dx, dy in _BODY:
-            m = world.get(self.x + dx, self.y + dy)
-            dps = float(M.CONTACT_DPS[m])
+            xi, yi = int(self.x + dx), int(self.y + dy)
+            if 0 <= xi < w and 0 <= yi < h:
+                m = mat.item(yi, xi)
+            else:
+                m = M.BEDROCK
+            dps = _CONTACT_DPS[m]
             if dps > worst:
                 worst = dps
                 if m in (M.LAVA, M.FIRE, M.NAPALM):
                     self.burn_t = 30
-            if M.POISONOUS[m]:
+            if _POISONOUS[m]:
                 poisoned = True
             if m == M.MAGIC:
                 game.magic_touch(self)
@@ -411,7 +459,7 @@ class Grub:
         if poisoned:
             self.poisoned = True
         # drowning: head under liquid
-        if self.head_in_liquid(world) and world.is_liquid(self.x, self.y - 4):
+        if self.head_in_liquid(world) and liquid_at(world, self.x, self.y - 4):
             self.drown_t += dt
             if self.drown_t > 0.8:
                 self.hurt(DROWN_DPS * dt, game)

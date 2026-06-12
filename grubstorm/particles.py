@@ -65,27 +65,31 @@ class Particles:
         cell = world.mat[yi, xi]
         ph = M.PHASE[cell]
         blocked = ph >= M.P_LIQUID
-        for j in np.nonzero(blocked)[0]:
+        if not blocked.any():
+            return
+        kinds = self.kind[live]
+        # visual motes just die on contact (vectorized: no per-kind effects)
+        self.alive[live[blocked & (kinds == KIND_FX)]] = False
+        # debris deposits one cell back where it came from, in index order
+        # — two grains aiming at one cell: the first one claims it
+        for j in np.nonzero(blocked & (kinds == KIND_MAT))[0]:
             i = live[j]
-            if self.kind[i] == KIND_MAT:
-                # deposit one cell back where we came from
-                bx = int(self.x[i] - self.vx[i])
-                by = int(self.y[i] - self.vy[i])
-                if world.in_bounds(bx, by) and \
-                        M.PHASE[world.mat[by, bx]] <= M.P_GAS:
-                    world.set_cell(bx, by, int(self.mat[i]))
-                self.alive[i] = False
-            elif self.kind[i] == KIND_SPARK:
-                # crawl along the surface: pick a conductive neighbour
-                if M.CONDUCTIVE[cell[j]]:
-                    self.vx[i] *= 0.8
-                    self.vy[i] = -abs(self.vy[i]) * 0.4
-                    world.temp[yi[j], xi[j]] += 40
-                else:
-                    self.vx[i] = -self.vx[i] * 0.5
-                    self.vy[i] = -self.vy[i] * 0.5
+            bx = int(self.x[i] - self.vx[i])
+            by = int(self.y[i] - self.vy[i])
+            if world.in_bounds(bx, by) and \
+                    M.PHASE[world.mat[by, bx]] <= M.P_GAS:
+                world.set_cell(bx, by, int(self.mat[i]))
+            self.alive[i] = False
+        for j in np.nonzero(blocked & (kinds == KIND_SPARK))[0]:
+            i = live[j]
+            # crawl along the surface: pick a conductive neighbour
+            if M.CONDUCTIVE[cell[j]]:
+                self.vx[i] *= 0.8
+                self.vy[i] = -abs(self.vy[i]) * 0.4
+                world.temp[yi[j], xi[j]] += 40
             else:
-                self.alive[i] = False
+                self.vx[i] = -self.vx[i] * 0.5
+                self.vy[i] = -self.vy[i] * 0.5
 
     def live_indices(self):
         return np.nonzero(self.alive)[0]

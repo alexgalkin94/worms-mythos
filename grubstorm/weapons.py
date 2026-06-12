@@ -3,6 +3,7 @@ import math
 
 from . import materials as M
 from .constants import GRAVITY, WIND_ACCEL, GRUB_RADIUS
+from .grub import solid_at, liquid_at
 from .particles import KIND_MAT, KIND_SPARK, KIND_FX
 
 
@@ -66,7 +67,7 @@ class Projectile:
                 return False
 
         w = game.world
-        in_liquid = w.is_liquid(self.x, self.y)
+        in_liquid = liquid_at(w, self.x, self.y)
         g = GRAVITY * self.gravity * game.gravity_scale * w.gravity_dir
         self.vy += g
         self.vx += game.wind * self.wind * WIND_ACCEL
@@ -88,9 +89,11 @@ class Projectile:
         if self.proximity is not None and self.age > self.arm_delay:
             if self.resting:
                 self.passive = True
+            pr = self.proximity
             for gr in game.all_grubs():
                 if gr.alive and gr is not self.owner and \
-                        math.hypot(gr.x - self.x, gr.y - self.y) < self.proximity:
+                        abs(gr.x - self.x) < pr and abs(gr.y - self.y) < pr \
+                        and math.hypot(gr.x - self.x, gr.y - self.y) < pr:
                     self.fuse = min(self.fuse if self.fuse is not None else 40, 40)
                     self.passive = False
                     break
@@ -104,24 +107,31 @@ class Projectile:
         # intended
         contact_fused = self.bounce is None or \
             (self.proximity is not None and self.age > self.arm_delay)
+        if contact_fused and self.age > 3:
+            # candidates can't change mid-flight: a hit exits immediately
+            cr = GRUB_RADIUS + self.radius
+            targets = [gr for gr in game.all_grubs() if gr.alive and
+                       (gr is not self.owner or self.age > 30)]
+        else:
+            targets = None
         for _ in range(steps):
             nx, ny = self.x + sx, self.y + sy
             # direct grub hit
-            if contact_fused and self.age > 3:
-                for gr in game.all_grubs():
-                    if gr.alive and (gr is not self.owner or self.age > 30) and \
-                            math.hypot(gr.x - nx, gr.y - ny) < GRUB_RADIUS + self.radius:
+            if targets is not None:
+                for gr in targets:
+                    if abs(gr.x - nx) < cr and abs(gr.y - ny) < cr and \
+                            math.hypot(gr.x - nx, gr.y - ny) < cr:
                         self.x, self.y = nx, ny
                         self.explode(game)
                         return False
-            if w.is_solid(nx, ny):
+            if solid_at(w, nx, ny):
                 if self.bounce is None:
                     self.x, self.y = nx, ny
                     self.explode(game)
                     return False
                 # bounce: reflect off the cheap normal
-                hit_x = w.is_solid(self.x + sx, self.y)
-                hit_y = w.is_solid(self.x, self.y + sy)
+                hit_x = solid_at(w, self.x + sx, self.y)
+                hit_y = solid_at(w, self.x, self.y + sy)
                 if hit_x or not (hit_x or hit_y):
                     self.vx = -self.vx * self.bounce
                     sx = -sx * self.bounce
@@ -237,7 +247,7 @@ class Stream:
             reach = 2
             for i in range(2, 60):
                 cx, cy = ox + dx * i, oy + dy * i
-                if w.is_solid(cx, cy):
+                if solid_at(w, cx, cy):
                     break
                 reach = i
                 w.temp[int(cy), int(cx)] = -250.0

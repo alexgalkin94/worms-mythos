@@ -6,15 +6,17 @@ stream + seed reproduces the same match on every machine (lockstep net play).
 import math
 import random
 
+import numpy as np
+
 from . import materials as M
 from .constants import (GRUB_HP, TURN_SECONDS, RETREAT_SECONDS,
                         SETTLE_TIMEOUT, SUDDEN_DEATH_AFTER, CRATE_CHANCE,
                         GRUB_NAMES, SLUDGE_POISON, GRUB_RADIUS)
 from .world import World
 from .mapgen import generate
-from .grub import Grub, GLOAT_QUIPS, OOPS_QUIPS
+from .grub import Grub, GLOAT_QUIPS, OOPS_QUIPS, solid_at, mat_at
 from .particles import Particles, KIND_MAT, KIND_SPARK, KIND_FX
-from .weapons import WEAPONS, W_BY_KEY, Projectile, default_ammo
+from .weapons import WEAPONS, W_BY_KEY, Projectile, Stream, default_ammo
 from .bodies import RigidBody
 
 
@@ -100,18 +102,20 @@ class Crate:
         if not self.landed:
             self.vy = min(self.vy + 0.04, 0.55)     # parachute
             self.y += self.vy
-            if w.is_solid(self.x, self.y + 3):
+            if solid_at(w, self.x, self.y + 3):
                 self.landed = True
         else:
-            if not w.is_solid(self.x, self.y + 3):
+            if not solid_at(w, self.x, self.y + 3):
                 self.y += 1.2                        # ground was destroyed
-            m = w.get(self.x, self.y)
+            m = mat_at(w, self.x, self.y)
             if M.LIQUID[m] or m == M.FIRE:
                 game.apply_explosion(self.x, self.y, 8, 30, fire=True)
                 self.alive = False
                 return False
         for gr in game.all_grubs():
-            if gr.alive and math.hypot(gr.x - self.x, gr.y - self.y) < 5:
+            if gr.alive and abs(gr.x - self.x) < 5 and \
+                    abs(gr.y - self.y) < 5 and \
+                    math.hypot(gr.x - self.x, gr.y - self.y) < 5:
                 game.collect_crate(self, gr)
                 return False
         if self.y > w.h:
@@ -491,7 +495,6 @@ class Game:
                         gr.dmg_acc = 0.0
         # blowtorch/drill are hold-to-dig: releasing FIRE stops them
         if inp is not None and not inp.fire:
-            from .weapons import Stream
             for e in self.entities:
                 if isinstance(e, Stream) and e.kind in ("torch", "drill") \
                         and e.grub is self.active_grub:
@@ -503,18 +506,16 @@ class Game:
         self.crates = [c for c in self.crates if c.update(self)]
 
         # spark particles shock nearby grubs
-        sparks = [i for i in self.particles.live_indices()
-                  if self.particles.kind[i] == KIND_SPARK]
-        if sparks:
+        pa = self.particles
+        sparks = np.flatnonzero(pa.alive & (pa.kind == KIND_SPARK))[:40]
+        if len(sparks):
+            sx, sy = pa.x[sparks], pa.y[sparks]
             for g in self.all_grubs():
                 if not g.alive:
                     continue
-                for i in sparks[:40]:
-                    if abs(self.particles.x[i] - g.x) < 4 and \
-                            abs(self.particles.y[i] - g.y) < 4:
-                        g.hurt(0.7, self)
-                        g.shock_t = 20
-                        break
+                if ((np.abs(sx - g.x) < 4) & (np.abs(sy - g.y) < 4)).any():
+                    g.hurt(0.7, self)
+                    g.shock_t = 20
 
         active = self.active_grub
         if self.phase == Game.PH_ACTIVE and active is not None and active.alive:
@@ -802,9 +803,7 @@ class Game:
             b.resting = brest
             # reclaim our cells from the restored world so the body doesn't
             # mistake itself for terrain and self-destruct
-            b.written = [(cx, cy) for (cx, cy) in b._rect_cells()
-                         if self.world.in_bounds(cx, cy)
-                         and self.world.mat[cy, cx] == b.mat]
+            b.reclaim(self.world)
             self.bodies.append(b)
         self.tracers = []
         a = snap["active"]
