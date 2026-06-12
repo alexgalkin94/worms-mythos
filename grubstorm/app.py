@@ -1287,13 +1287,12 @@ class App:
             t_d0 = time.perf_counter()
             self.screen.draw(view)
             t_d1 = time.perf_counter()
+            # stage-cost EWMAs (ms): always tracked — the sandbox sizes its
+            # per-frame sim budget from what draw+present actually cost
+            self._ms_u = self._ms_u * 0.9 + (t_u1 - t_u0) * 100
+            self._ms_d = self._ms_d * 0.9 + (t_d1 - t_d0) * 100
+            self._ms_c = self._ms_c * 0.9 + self._last_crt * 100
             if self.settings.get("show_fps"):
-                # fps + compositor mode + stage costs (update/draw/present
-                # ms, exp-smoothed) — the numbers to report when hunting
-                # performance
-                self._ms_u = self._ms_u * 0.9 + (t_u1 - t_u0) * 100
-                self._ms_d = self._ms_d * 0.9 + (t_d1 - t_d0) * 100
-                self._ms_c = self._ms_c * 0.9 + self._last_crt * 100
                 mode = "GPU" if self.gpu_win is not None else "CPU"
                 txt = (f"{self.clock.get_fps():.0f} {mode} "
                        f"u{self._ms_u:.1f} d{self._ms_d:.1f} c{self._ms_c:.1f}")

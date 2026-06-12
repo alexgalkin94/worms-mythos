@@ -445,13 +445,16 @@ class SandboxScreen:
             if g is not None and g.alive:
                 a = math.atan2(ui.my - g.y, ui.mx - g.x)
                 inp.aim = round(a * 1000) / 1000
-            # frame-budgeted slicing: spend at most ~60% of the frame
-            # budget on sim slices. A heavy tick then spans several
-            # frames (brief slow-motion) instead of freezing one — the
-            # render stays fluid no matter how much lava gets spammed.
+            # frame-budgeted slicing: the sim only gets what the frame has
+            # left after the measured draw+present cost (EWMAs from the
+            # app loop) plus a slack for events/audio. A heavy tick then
+            # spans several frames (brief slow-motion) instead of freezing
+            # one — render fluidity always wins over sim realtime.
             self._tick_debt = min(self._tick_debt + self.app.sim_steps, 3)
             cap = int(self.app.settings.get("fps_cap", 144)) or 144
-            budget = 0.6 / max(cap, 60)
+            frame_ms = 1000.0 / min(cap, 240)
+            budget = max(1.5, frame_ms - self.app._ms_d
+                         - self.app._ms_c - 1.0) / 1000.0
             t0 = time.perf_counter()
             while True:
                 if self._slices is None:
@@ -459,11 +462,16 @@ class SandboxScreen:
                         break
                     self._tick_debt -= 1
                     self._slices = self.rig.step_slices(inp)
+                s0 = time.perf_counter()
                 try:
                     next(self._slices)
                 except StopIteration:
                     self._slices = None
-                if time.perf_counter() - t0 > budget:
+                now = time.perf_counter()
+                # predictive stop: if another slice like the last one
+                # would blow the budget, don't start it (the first slice
+                # of a frame always runs, so the sim can't starve)
+                if now - t0 + (now - s0) * 0.8 > budget:
                     break
         if self.msg_t > 0:
             self.msg_t -= 1
