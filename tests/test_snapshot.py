@@ -65,9 +65,8 @@ def restore_into_fresh(src, fresh_seed=123456):
     dst._wake_cool = src._wake_cool
     dst._cool_box = list(src._cool_box) if src._cool_box else None
     dst.pending_detonations = list(src.pending_detonations)
-    # mirrors must match the restored cells (Game.restore does the same)
-    dst.phase = M.PHASE[dst.mat]
-    dst.dens = M.DENSITY[dst.mat]
+    # phase/density mirrors are rebuilt by from_bytes itself; replacing
+    # the arrays afterwards would orphan the bound flat swap views
     return dst
 
 

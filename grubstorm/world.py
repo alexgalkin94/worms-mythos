@@ -1165,4 +1165,11 @@ class World:
         self.rest = np.frombuffer(raw[4*n:5*n], np.uint8).reshape(self.h, self.w).copy()
         self.head = np.frombuffer(raw[5*n:9*n], np.uint32).reshape(self.h, self.w).copy()
         self.temp = np.frombuffer(raw[9*n:13*n], np.float32).reshape(self.h, self.w).copy()
+        # rebuild the derived mirrors HERE, before re-binding the flat
+        # views: future active regions assume out-of-region mirrors are
+        # valid, and any later wholesale replacement would orphan the
+        # views _apply_moves swaps through
+        self.phase = np.take(M.PHASE, self.mat)
+        self.dens = np.take(M.DENSITY, self.mat)
+        self.phm = self.phase.copy()
         self._bind_flats()       # the planes above are fresh buffers

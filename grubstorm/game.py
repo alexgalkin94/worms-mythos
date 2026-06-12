@@ -755,10 +755,8 @@ class Game:
         cb = snap.get("cool_box")
         self.world._cool_box = list(cb) if cb else None
         self.world.render_dirty = [0, self.world.h, 0, self.world.w]
-        # the phase/density mirrors must match the restored cells everywhere,
-        # since future active regions assume out-of-region mirrors are valid
-        self.world.phase = M.PHASE[self.world.mat]
-        self.world.dens = M.DENSITY[self.world.mat]
+        # phase/density mirrors are rebuilt inside from_bytes — replacing
+        # them here would orphan the flat swap views bound to the arrays
         self.fired_this_turn = snap["fired"]
         self.prev_fire = snap["prev_fire"]
         rs = snap["rng"]
