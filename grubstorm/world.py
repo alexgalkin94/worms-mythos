@@ -10,6 +10,14 @@ from . import materials as M
 from .constants import GRID_W, GRID_H, SIM_SUBSTEPS
 
 
+def nz2(mask):
+    """(ys, xs) of a 2-D bool mask. flatnonzero + divmod takes numpy's
+    1-D fast path and is ~7x quicker than 2-D np.nonzero; the order
+    (row-major) and values are identical."""
+    idx = np.flatnonzero(mask)
+    return np.divmod(idx, mask.shape[1])
+
+
 def shift(a, dy, dx, fill):
     """out[y, x] = a[y + dy, x + dx], edges filled with `fill`."""
     out = np.full_like(a, fill)
@@ -480,7 +488,7 @@ class World:
             cand = liq2 & surfm & ~cling & \
                 (hd != np.uint32(0xFFFFFFFF)) & (rnd > visc)
             if cand.any():
-                cy, cx = np.nonzero(cand)
+                cy, cx = nz2(cand)
                 cid = hd[cy, cx]
                 order = np.lexsort((cx, cy, cid))
                 cy, cx, cid = cy[order], cx[order], cid[order]
@@ -648,7 +656,7 @@ class World:
             self._wake_mask(fire, oy, ox)
             life[fire] = np.maximum(life[fire].astype(np.int16) - 1, 0).astype(np.uint8)
             dead = fire & (life == 0)
-            ys, xs = np.nonzero(dead)
+            ys, xs = nz2(dead)
             if len(ys):
                 r = rng.random(len(ys))
                 smoke = r < 0.25
@@ -665,7 +673,7 @@ class World:
         self.v_rest[near_hot | hot] = 0
         cand = near_hot & (M.FLAMMABLE[mat] > 0) & (burn == 0)
         ignite = np.zeros_like(cand)
-        cys, cxs = np.nonzero(cand)
+        cys, cxs = nz2(cand)
         if len(cys):
             roll = rng.random(len(cys))
             lit = roll < M.FLAMMABLE[mat[cys, cxs]]
@@ -674,7 +682,7 @@ class World:
             self._wake_mask(ignite, oy, ox)
             det = ignite & ((mat == M.EXPOWDER) | (mat == M.NITRO))
             if det.any():
-                ys, xs = np.nonzero(det)
+                ys, xs = nz2(det)
                 # queue a handful per tick; the rest chain later
                 for i in range(min(len(ys), 4)):
                     self.pending_detonations.append(
@@ -697,7 +705,7 @@ class World:
             above_empty = self._bshift(mat == M.EMPTY, up, 0)
             emit = burning & above_empty
             emit[0 if up < 0 else -1, :] = False
-            ys, xs = np.nonzero(emit)
+            ys, xs = nz2(emit)
             if len(ys):
                 keep = rng.random(len(ys)) < 0.22
                 ys, xs = ys[keep], xs[keep]
@@ -705,7 +713,7 @@ class World:
                 life[ys + up, xs] = rng.integers(25, 70, len(ys)).astype(np.uint8)
             life[burning] = np.maximum(life[burning].astype(np.int16) - 1, 0).astype(np.uint8)
             # liquids burn away faster
-            ys, xs = np.nonzero(burning & (M.PHASE[mat] == M.P_LIQUID))
+            ys, xs = nz2(burning & (M.PHASE[mat] == M.P_LIQUID))
             if len(ys):
                 keep = rng.random(len(ys)) < 0.03
                 ys, xs = ys[keep], xs[keep]
@@ -737,7 +745,7 @@ class World:
             return
         # per-candidate rolls instead of a full-region random field
         roll = np.ones(mat.shape, np.float32)
-        ays, axs = np.nonzero(acid & fresh)
+        ays, axs = nz2(acid & fresh)
         roll[ays, axs] = rng.random(len(ays))
         for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             acid = (mat == M.ACID) & fresh
@@ -746,7 +754,7 @@ class World:
             nb = shift(mat, dy, dx, M.BEDROCK)
             eat = acid & (M.CORRODIBLE[nb] > 0) & \
                 (roll < M.CORRODIBLE[nb] * 0.5)
-            ys, xs = np.nonzero(eat)
+            ys, xs = nz2(eat)
             if len(ys) == 0:
                 continue
             ty, tx = ys + dy, xs + dx
@@ -853,7 +861,7 @@ class World:
             life[hot_oil] = M.BURN_FUEL[M.OIL]
         boom = ((mat == M.NITRO) & (t > 210)) | ((mat == M.EXPOWDER) & (t > 280))
         if boom.any():
-            ys, xs = np.nonzero(boom)
+            ys, xs = nz2(boom)
             for i in range(min(len(ys), 3)):
                 self.pending_detonations.append(
                     (ox + int(xs[i]), oy + int(ys[i]),
@@ -874,7 +882,7 @@ class World:
             destroy = (dist <= r) & (M.HARDNESS[sub] < local) & (sub != M.BEDROCK)
             # debris: sample some destroyed solid cells into particles
             solid_destroyed = destroy & (M.SOLID[sub])
-            ys, xs = np.nonzero(solid_destroyed)
+            ys, xs = nz2(solid_destroyed)
             if len(ys):
                 take = self.rng.permutation(len(ys))[:min(len(ys), 60)]
                 for i in take:
@@ -907,7 +915,7 @@ class World:
                 self.life[sy, sx][fz] = self.rng.integers(30, 80, int(fz.sum())).astype(np.uint8)
             # secondary: explosives caught in the blast chain-react
             chain = (dist <= r * 1.3) & ((sub == M.EXPOWDER) | (sub == M.NITRO))
-            cys, cxs = np.nonzero(chain)
+            cys, cxs = nz2(chain)
             for i in range(min(len(cys), 5)):
                 self.pending_detonations.append(
                     (sx.start + int(cxs[i]), sy.start + int(cys[i]),
@@ -919,7 +927,7 @@ class World:
             self.life[sy, sx][gasm] = 40
             # splash liquids outward as droplets
             liq = (dist <= r * 1.25) & (M.LIQUID[sub])
-            lys, lxs = np.nonzero(liq)
+            lys, lxs = nz2(liq)
             if len(lys):
                 take = self.rng.permutation(len(lys))[:min(len(lys), 50)]
                 for i in take:
