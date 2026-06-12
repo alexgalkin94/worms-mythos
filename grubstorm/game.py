@@ -697,6 +697,8 @@ class Game:
             # the active-region box shapes the size of per-step RNG draws,
             # so it is real simulation state — restore it exactly
             "wake_box": self.world._wake_box,
+            "wake_cool": self.world._wake_cool,
+            "cool_box": self.world._cool_box,
             "rng": [rs[0], list(rs[1]), rs[2]],
             "nprng": self.world.rng.bit_generator.state,
             "headstones": [list(h) for h in self.headstones],
@@ -749,6 +751,9 @@ class Game:
         self.world.tick = snap["world_tick"]
         self.world._wake_box = list(snap["wake_box"]) \
             if snap["wake_box"] is not None else None
+        self.world._wake_cool = snap.get("wake_cool", 0)
+        cb = snap.get("cool_box")
+        self.world._cool_box = list(cb) if cb else None
         self.world.render_dirty = [0, self.world.h, 0, self.world.w]
         # the phase/density mirrors must match the restored cells everywhere,
         # since future active regions assume out-of-region mirrors are valid

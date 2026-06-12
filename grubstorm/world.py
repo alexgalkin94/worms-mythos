@@ -61,6 +61,8 @@ class World:
         self.phase = M.PHASE[self.mat]
         self.dens = M.DENSITY[self.mat]
         self._wake_box: list[int] | None = [0, h, 0, w]
+        self._wake_cool = 0
+        self._cool_box: list[int] | None = None
         self.render_dirty: list[int] | None = [0, h, 0, w]
         self.last_region = None
         self._ry0 = self._rx0 = 0
@@ -176,7 +178,7 @@ class World:
         x0 = int(cols.argmax()); x1 = len(cols) - int(cols[::-1].argmax())
         self.wake(ox + x0, oy + y0, ox + x1 - 1, oy + y1 - 1)
 
-    def _apply_moves(self, mask, dy, dx, reset_rest=True):
+    def _apply_moves(self, mask, dy, dx, reset_rest=True, keep_awake=True):
         ys, xs = np.nonzero(mask)
         n = len(ys)
         if n == 0:
@@ -195,8 +197,22 @@ class World:
             self.v_rest[ys, xs] = 0
             self.v_rest[ty, tx] = 0
         oy, ox = self._ry0, self._rx0
-        self.wake(ox + int(xs.min()) - 1, oy + int(ys.min()) - 1,
-                  ox + int(xs.max()) + 1, oy + int(ys.max()) + 1)
+        x0 = ox + int(xs.min()) - 1; y0 = oy + int(ys.min()) - 1
+        x1 = ox + int(xs.max()) + 1; y1 = oy + int(ys.max()) + 1
+        if keep_awake:
+            self.wake(x0, y0, x1, y1)
+        else:
+            # cosmetic-grade motion (ripple shuffling): repaint it, but it
+            # must not keep the active region alive on its own — it rides
+            # along while other rules do real work, then stops with them
+            d = self.render_dirty
+            y1 += 1; x1 += 1
+            if d is None:
+                self.render_dirty = [max(0, y0), min(self.h, y1),
+                                     max(0, x0), min(self.w, x1)]
+            else:
+                d[0] = min(d[0], max(0, y0)); d[1] = max(d[1], min(self.h, y1))
+                d[2] = min(d[2], max(0, x0)); d[3] = max(d[3], min(self.w, x1))
         return n
 
     @staticmethod
@@ -269,6 +285,41 @@ class World:
         # forever while creep re-mixes what sinking un-mixes
         n_sink = self._apply_moves(liq & sink & ~below_free & ~dribble, g, 0)
         d = 1 if parity else -1
+        # hydrostatic push: a submerged cell (liquid overhead = pressure)
+        # squeezes sideways into free space. The bubble it leaves behind
+        # collapses next tick, the column drops — real U-tube physics, so
+        # a tank drains through a hole punched below the waterline until
+        # the level meets the hole. At rest no cell has both pressure and
+        # an open side, so settled pools stay asleep.
+        # hydrostatic flow. A cell is pressurized if liquid stands on it;
+        # pressure conducts horizontally through each row-wise connected
+        # liquid run (vectorized: segment ids via cumsum, one bincount).
+        # Any cell of a pressure-fed run may exit through an open side —
+        # so a tank drains through a tunnel punched below the waterline,
+        # U-tubes equalize, and slopes flow out. Flow needs an open cell
+        # ABOVE the destination surface, which only exists while some
+        # connected column stands >= 2 higher: settled pools (and ±1
+        # ripples) have no candidates and stay fully asleep.
+        pressured = liq & (self._bshift(ph, -g, 0) == M.P_LIQUID)
+        if pressured.any():
+            starts = liq & ~self._bshift(liq, 0, -1)
+            seg = np.cumsum(starts, axis=1, dtype=np.int32)
+            seg += (np.arange(liq.shape[0], dtype=np.int32)[:, None]
+                    * (liq.shape[1] // 2 + 2))
+            seg *= liq
+            fed = np.zeros(int(seg.max()) + 1, bool)
+            fed[seg[pressured]] = True
+            fed[0] = False
+            run_fed = fed[seg]
+            for dd in (d, -d):
+                ph = self.v_phase
+                liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
+                flow = liq2 & run_fed & ~cling & \
+                    self._bshift(ph <= M.P_GAS, 0, dd) & \
+                    (rnd > M.VISCOSITY[self.v_mat]) & \
+                    ((rnd < 0.5) if dd == d else (rnd >= 0.5))
+                real_work |= flow
+                n += self._apply_moves(flow, 0, dd)
         for dd in (d, -d):
             ph = self.v_phase
             liq = ph == M.P_LIQUID
@@ -347,14 +398,15 @@ class World:
             slide = surf & self._bshift(free, g, 2 * dd)
             n += self._apply_moves(slide, 0, dd)
             if creep_on:
-                # the second open column means the target is a real lower
-                # shelf, not a one-cell hollow — creeping into a hollow
-                # would just teleport the hollow uphill and the resulting
-                # endless ripple shuffle keeps whole oceans awake
+                # creep may also fill one-cell hollows (which teleports
+                # the hollow uphill — that's how ripples annihilate), but
+                # it NEVER keeps the region awake by itself: it rides the
+                # levelling window while pours/flows do real work, so a
+                # flat-but-rippled ocean still goes fully to sleep
                 creep = surf & inbox & ~slide & \
-                    ~self._bshift(free, 0, -dd) & \
-                    self._bshift(free, 0, 2 * dd)
-                n += self._apply_moves(creep, 0, dd, reset_rest=False)
+                    ~self._bshift(free, 0, -dd)
+                n += self._apply_moves(creep, 0, dd, reset_rest=False,
+                                       keep_awake=False)
         return n
 
     def _gas_pass(self, parity):
@@ -680,6 +732,15 @@ class World:
         box = self._wake_box
         self._wake_box = None
         self.last_region = None
+        # box hysteresis: many flow rules are probability-gated, so a few
+        # remaining candidates can all skip one tick by chance — without a
+        # grace period that single quiet tick would freeze them forever
+        if box is None and self._wake_cool > 0:
+            self._wake_cool -= 1
+            box = self._cool_box
+        elif box is not None:
+            self._wake_cool = 6
+            self._cool_box = list(box)
         if box is not None:
             y0 = max(0, box[0] - self.MARGIN)
             y1 = min(self.h, box[1] + self.MARGIN)

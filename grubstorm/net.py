@@ -16,7 +16,7 @@ import queue
 
 from .game import InputFrame
 
-PROTOCOL = 5       # bump when the sim or input encoding changes
+PROTOCOL = 6       # bump when the sim or input encoding changes
 
 
 class Session:
