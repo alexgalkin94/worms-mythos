@@ -75,6 +75,7 @@ class CRT:
         self._wide = pygame.Surface((self.vw, GRID_H))   # h-smeared, pre-rows
         self._persist = pygame.Surface((GRID_W, GRID_H))
         self._persist.fill((0, 0, 0))
+        self._persist_t = time.monotonic()
         self._phosphor = None
         self._shine = None
         self._built_for = None
@@ -182,15 +183,23 @@ class CRT:
             self._build_overlays()
         bloom_amt = float(s.get("bloom", 0.7))
 
-        # phosphor persistence: faint trails on bright movement
+        # phosphor persistence: faint trails on bright movement. The decay
+        # is time-based (framerate independent) and scales with the slider:
+        # 0 = off, 0.45 ~ a 70 ms half-life shimmer, 1.0 ~ a 300 ms haunt.
         pers = float(s.get("crt_persist", 0.45))
+        dt = max(0.0, min(0.05, now - self._persist_t))
+        self._persist_t = now
         if pers > 0.02 and not s.get("reduce_flash"):
-            d = int(255 - 87 * pers)
-            self._persist.fill((d, d + 4, d + 10),
+            half_life = 0.015 + 0.285 * pers * pers
+            k = 0.5 ** (dt / half_life)
+            d = int(255 * k)
+            self._persist.fill((max(0, d - 8), max(0, d - 5), d),
                                special_flags=pygame.BLEND_RGB_MULT)
             view.blit(self._persist, (0, 0),
                       special_flags=pygame.BLEND_RGB_MAX)
             self._persist.blit(view, (0, 0))
+        else:
+            self._persist.fill((0, 0, 0))
 
         # deconvergence: blended shift, strength on its own slider
         ab = float(s.get("crt_fringe", 0.25))
