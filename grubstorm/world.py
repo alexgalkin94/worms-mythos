@@ -70,6 +70,10 @@ class World:
         self.water_level = h + 10                  # rows >= level are "ocean"
         self.phase = M.PHASE[self.mat]
         self.dens = M.DENSITY[self.mat]
+        # constant (y<<9 | x) id plane; the head solver slices windows out
+        # of it instead of rebuilding the arange grid every tick
+        self._ids_plane = ((np.arange(h, dtype=np.uint32) << 9)[:, None]
+                           + np.arange(w, dtype=np.uint32)[None, :])
         self._wake_box: list[int] | None = [0, h, 0, w]
         self._wake_cool = 0
         self._cool_box: list[int] | None = None
@@ -427,14 +431,14 @@ class World:
             lqe = phe == M.P_LIQUID
             fre = phe <= M.P_GAS
             sfe = lqe & shift(fre, -1, 0, ey0 == 0)
-            ids = ((np.arange(ey0, ey1, dtype=np.uint32) << 9)[:, None]
-                   + np.arange(ex0, ex1, dtype=np.uint32)[None, :])
+            ids = self._ids_plane[ey0:ey1, ex0:ex1]
             np.minimum(hde, np.where(sfe, ids, BIG), out=hde)
             blocked = ~lqe
             # barrier plane: OR with all-ones forces BIG on blocked cells,
             # OR with 0 is identity — one pure vector op instead of a
             # boolean fancy-assignment (which was ~6x slower per sweep)
-            barrier = np.where(blocked, np.uint32(BIG), np.uint32(0))
+            barrier = blocked.astype(np.uint32)
+            barrier *= np.uint32(BIG)
             np.bitwise_or(hde, barrier, out=hde)
             # in-place slice minimums (no shift allocations); the barrier
             # reset after EVERY direction is load-bearing — without it the

@@ -3,6 +3,7 @@ import json
 import math
 import os
 import random
+import time
 
 import pygame
 
@@ -1181,6 +1182,8 @@ class App:
         self.clock = pygame.time.Clock()
         self.sim_steps = 1
         self._acc = 0.0
+        self._ms_u = self._ms_d = self._ms_c = 0.0
+        self._last_crt = 0.0
         from .pixelfont import PixelFont
         self._fps_font = PixelFont(1)
 
@@ -1265,8 +1268,10 @@ class App:
                     self.running = False
             if self.gpu_win is not None:
                 self.ui.win_size = self.gpu_win.size
+            t_u0 = time.perf_counter()
             self.ui.begin(events)
             self.screen.update(events)
+            t_u1 = time.perf_counter()
             # mood-aware soundtrack: menus get the theme, arenas their tone
             if isinstance(self.screen, GameScreen):
                 biome = self.screen.settings.get("biome", "island")
@@ -1279,15 +1284,27 @@ class App:
             self.music.update()
             self._update_ambience(mood)
             view = self.renderer.view
+            t_d0 = time.perf_counter()
             self.screen.draw(view)
+            t_d1 = time.perf_counter()
             if self.settings.get("show_fps"):
-                fps = self._fps_font.render(f"{self.clock.get_fps():.0f}",
-                                            True, (120, 255, 120))
+                # fps + compositor mode + stage costs (update/draw/present
+                # ms, exp-smoothed) — the numbers to report when hunting
+                # performance
+                self._ms_u = self._ms_u * 0.9 + (t_u1 - t_u0) * 100
+                self._ms_d = self._ms_d * 0.9 + (t_d1 - t_d0) * 100
+                self._ms_c = self._ms_c * 0.9 + self._last_crt * 100
+                mode = "GPU" if self.gpu_win is not None else "CPU"
+                txt = (f"{self.clock.get_fps():.0f} {mode} "
+                       f"u{self._ms_u:.1f} d{self._ms_d:.1f} c{self._ms_c:.1f}")
+                fps = self._fps_font.render(txt, True, (120, 255, 120))
                 view.blit(fps, (GRID_W - fps.get_width() - 2, GRID_H - 12))
             # GPU mode presents through its renderer; only the CPU path
             # has a display surface to flip
+            t_c0 = time.perf_counter()
             if not self.crt.present(view, self.screen_surf):
                 pygame.display.flip()
+            self._last_crt = time.perf_counter() - t_c0
         save_settings(self.settings)
         pygame.quit()
 
