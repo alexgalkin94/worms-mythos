@@ -192,6 +192,15 @@ def generate(biome: str, seed: int, w: int = GRID_W, h: int = GRID_H) -> MapSpec
     # floods find their level, loose grains land, gas pockets rise. The
     # match then opens on a quiet world instead of a mass earthquake (the
     # settle is by far the most expensive phase the sim ever sees).
+    # analytic hydrostatic mass init: every liquid column starts at its
+    # exact equilibrium (1 + depth*LCOMP per cell), so the mass automaton
+    # has zero settle work to do on oceans and ponds
+    liq = M.PHASE[world.mat] == M.P_LIQUID
+    idx = np.arange(world.h, dtype=np.int32)[:, None]
+    last_air = np.maximum.accumulate(np.where(~liq, idx, -1), axis=0)
+    depth = np.where(liq, idx - last_air, 0).astype(np.float32)
+    world.lmass[:] = np.where(liq, 1.0 + (depth - 1) * float(World.LCOMP),
+                              0.0)
     world._wake_box = [0, h, 0, w]
     world.settle_mode = True
     for _ in range(900):

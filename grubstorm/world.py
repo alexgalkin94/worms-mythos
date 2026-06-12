@@ -40,7 +40,7 @@ class World:
         self.life = np.zeros((h, w), np.uint8)    # gas life / burn fuel
         self.burn = np.zeros((h, w), np.uint8)    # burning flag for fuels
         self.rest = np.zeros((h, w), np.uint8)    # liquid settle counter
-        self.head = np.full((h, w), 65535, np.uint16)  # hydrostatic head (y)
+        self.lmass = np.zeros((h, w), np.float32)  # liquid mass (pressure)
         self.temp = np.full((h, w), 20.0, np.float32)
         self.moved = np.zeros((h, w), np.uint8)
         self.tick = 0
@@ -48,8 +48,6 @@ class World:
         self.ambient = 20.0
         self.gravity_dir = 1                       # -1 in gravity-invert chaos
         self.activity = 0                          # moved cells last tick
-        self.level_until = 0     # ticks: terrace creep allowed while open
-        self.level_box = None    # where the last real gravity work happened
         self.settle_mode = False  # mapgen pre-settle: mechanics only
         self.pending_detonations: list[tuple[int, int, int]] = []  # x, y, mat
         self.events: list[dict] = []               # explosions etc, for fx/sfx
@@ -61,9 +59,9 @@ class World:
         self.water_level = h + 10                  # rows >= level are "ocean"
         self.phase = M.PHASE[self.mat]
         self.dens = M.DENSITY[self.mat]
-        self._wake_box: list[int] | None = [0, h, 0, w]
+        self._wake_boxes: list[list[int]] = [[0, h, 0, w]]
         self._wake_cool = 0
-        self._cool_box: list[int] | None = None
+        self._cool_boxes: list[list[int]] = []
         self.render_dirty: list[int] | None = [0, h, 0, w]
         self.last_region = None
         self._ry0 = self._rx0 = 0
@@ -151,24 +149,69 @@ class World:
     # Movement passes run only inside the "active region" — a bounding box
     # around everything that moved or reacted recently. Settled worlds cost
     # almost nothing. self.v_* are views into that region.
+    WAKE_GAP = 24        # boxes closer than this merge into one
+    MAX_BOXES = 5
+
     def wake(self, x0, y0, x1, y1):
-        """Mark a rectangle (inclusive coords) as active next step."""
+        """Mark a rectangle (inclusive coords) as active next step.
+        Disjoint activity pockets get their own boxes so one dripping
+        brook can't stretch the region across the whole sleeping map."""
         x0 = max(0, int(x0)); y0 = max(0, int(y0))
         x1 = min(self.w, int(x1) + 1); y1 = min(self.h, int(y1) + 1)
         if x0 >= x1 or y0 >= y1:
             return
-        b = self._wake_box
-        if b is None:
-            self._wake_box = [y0, y1, x0, x1]
-        else:
-            b[0] = min(b[0], y0); b[1] = max(b[1], y1)
-            b[2] = min(b[2], x0); b[3] = max(b[3], x1)
+        new = [y0, y1, x0, x1]
+        gap = self.WAKE_GAP
+        boxes = self._wake_boxes
+        merged = True
+        while merged:
+            merged = False
+            for i, b in enumerate(boxes):
+                if (new[0] - gap < b[1] and b[0] - gap < new[1] and
+                        new[2] - gap < b[3] and b[2] - gap < new[3]):
+                    new = [min(new[0], b[0]), max(new[1], b[1]),
+                           min(new[2], b[2]), max(new[3], b[3])]
+                    boxes.pop(i)
+                    merged = True
+                    break
+        boxes.append(new)
+        if len(boxes) > self.MAX_BOXES:
+            # merge the two closest boxes (deterministic order)
+            best, bi, bj = None, 0, 1
+            for i in range(len(boxes)):
+                for j in range(i + 1, len(boxes)):
+                    a, b = boxes[i], boxes[j]
+                    dy = max(0, max(a[0], b[0]) - min(a[1], b[1]))
+                    dx = max(0, max(a[2], b[2]) - min(a[3], b[3]))
+                    d2 = dy * dy + dx * dx
+                    if best is None or d2 < best:
+                        best, bi, bj = d2, i, j
+            a, b = boxes[bi], boxes[bj]
+            boxes[bi] = [min(a[0], b[0]), max(a[1], b[1]),
+                         min(a[2], b[2]), max(a[3], b[3])]
+            boxes.pop(bj)
         d = self.render_dirty
         if d is None:
             self.render_dirty = [y0, y1, x0, x1]
         else:
             d[0] = min(d[0], y0); d[1] = max(d[1], y1)
             d[2] = min(d[2], x0); d[3] = max(d[3], x1)
+
+    @property
+    def _wake_box(self):
+        """Compat view: the union of all active boxes (None if asleep)."""
+        if not self._wake_boxes:
+            return None
+        b = self._wake_boxes[0]
+        out = list(b)
+        for b in self._wake_boxes[1:]:
+            out = [min(out[0], b[0]), max(out[1], b[1]),
+                   min(out[2], b[2]), max(out[3], b[3])]
+        return out
+
+    @_wake_box.setter
+    def _wake_box(self, box):
+        self._wake_boxes = [] if box is None else [list(box)]
 
     def _wake_mask(self, mask, oy=0, ox=0):
         rows = mask.any(1)
@@ -193,7 +236,8 @@ class World:
         n = len(ys)
         ty, tx = ys + dy, xs + dx
         for a in (self.v_mat, self.v_shade, self.v_life, self.v_burn,
-                  self.v_temp, self.v_phase, self.v_dens, self.v_rest):
+                  self.v_temp, self.v_phase, self.v_dens, self.v_rest,
+                  self.v_lmass):
             tmp = a[ty, tx].copy()
             a[ty, tx] = a[ys, xs]
             a[ys, xs] = tmp
@@ -264,278 +308,193 @@ class World:
             n += self._apply_moves(ok, g, dd)
         return n
 
-    def _mark_level_work(self, real_work):
-        """Open/extend the levelling window box around real gravity work."""
-        if not real_work.any():
-            return
-        ys = np.nonzero(real_work.any(axis=1))[0]
-        xs = np.nonzero(real_work.any(axis=0))[0]
-        b = [int(ys[0]) + self._ry0 - 16, int(ys[-1]) + self._ry0 + 16,
-             int(xs[0]) + self._rx0 - 16, int(xs[-1]) + self._rx0 + 16]
-        if self.tick < self.level_until and self.level_box:
-            lb = self.level_box
-            b = [min(b[0], lb[0]), max(b[1], lb[1]),
-                 min(b[2], lb[2]), max(b[3], lb[3])]
-        self.level_box = b
-        self.level_until = self.tick + 120
+    # --- compressible-liquid constants (w-shadow.com mass model) ---------
+    LMAX = np.float32(1.0)       # normal mass capacity of a cell
+    LCOMP = np.float32(0.03)     # extra capacity per cell of depth
+    LMIN_SEE = np.float32(0.10)  # a cell materializes above this mass
+    LMIN_KEEP = np.float32(0.04) # and evaporates below this one
+    LFLOW_MIN = np.float32(0.0015)
+
+    def _stable_bottom(self, total):
+        """Of `total` mass shared by two stacked cells, how much belongs in
+        the lower one. Slight compressibility IS the pressure model: the
+        excess that doesn't fit gets pushed back up, so U-tubes equalize."""
+        out = total.copy()
+        LMAX, LCOMP = self.LMAX, self.LCOMP
+        mid = (total > LMAX) & (total < 2 * LMAX + LCOMP)
+        out[mid] = (LMAX * LMAX + total[mid] * LCOMP) / (LMAX + LCOMP)
+        hi = total >= 2 * LMAX + LCOMP
+        out[hi] = (total[hi] + LCOMP) * np.float32(0.5)
+        return out
 
     def _liquid_pass(self, parity, lateral=True):
-        """Vertical work (falling, sinking, slumping) runs every substep;
-        the expensive lateral machinery — hydrostatic flow, pours, flat
-        slosh, surface levelling — only needs one pass per tick."""
+        """Liquids are a compressible-mass cellular automaton (the classic
+        w-shadow model): every liquid cell carries mass, mass flows down,
+        sideways and — when compressed — UP. Hydrostatic pressure, tank
+        drains, U-tubes and level surfaces all emerge from one rule set.
+        Cells materialize/vanish from the mass field; density layering
+        between different liquids stays a discrete swap."""
         g = self.gravity_dir
-        ph, dens, rnd = self.v_phase, self.v_dens, self.v_rnd
-        liq = ph == M.P_LIQUID
-        if not liq.any():
-            return 0
-        visc = M.VISCOSITY[self.v_mat]
-        # stickiness: gels touching a static cell cling to it — they coat
-        # walls and dribble down them slowly instead of running off.
-        # Statics never move inside this pass, so one mask serves all of it.
-        stickv = M.STICKY[self.v_mat]
-        if stickv.any():
-            stat = ph == M.P_STATIC
-            near_wall = (self._bshift(stat, 0, 1) | self._bshift(stat, 0, -1) |
-                         self._bshift(stat, g, 0) | self._bshift(stat, -g, 0))
-            cling = near_wall & (rnd < stickv)
-            dribble = near_wall & (rnd < stickv * 0.55)
-        else:
-            cling = dribble = np.zeros_like(liq)
-        n = 0
-        real_work = np.zeros_like(liq)
-        d = 1 if parity else -1
-        if g == 1:
-            # pressure service BEFORE gravity: a hole inside a pressurized
-            # zone must be fed sideways first, or the column above always
-            # slumps back into it and hydrostatic rises pump in place
-            # forever. Uses last tick's head plane — one substep stale is
-            # fine, the solver below refreshes it.
-            yyv = (np.arange(liq.shape[0], dtype=np.int32)
-                   + self._ry0)[:, None]
-            deepv = liq & (self.v_head.astype(np.int32) <= yyv - 2)
-            if deepv.any():
-                for dd in (d, -d):
-                    ph = self.v_phase
-                    liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
-                    fl0 = liq2 & deepv & ~cling & \
-                        self._bshift(ph <= M.P_GAS, 0, dd) & (rnd > visc)
-                    real_work |= fl0
-                    n += self._apply_moves(fl0, 0, dd)
         ph = self.v_phase
         liq = ph == M.P_LIQUID
-        free = ph <= M.P_GAS
-        below_free = self._bshift(free, g, 0)
+        m = self.v_lmass
+        if not liq.any():
+            if m.any():
+                m[:] = 0.0       # mat was edited away (explosions, spells)
+            return 0
+        # sync the mass plane with the material plane: edits rule. Air
+        # cells may carry sub-visible residue mass (it gets re-collected),
+        # anything else solidified/burned/blasted away takes its mass.
+        kill = ~liq & (ph != M.P_EMPTY)
+        m[kill] = 0.0
+        np.copyto(m, self.LMAX, where=liq & (m <= 0))
+        rnd, dens = self.v_rnd, self.v_dens
+        visc = M.VISCOSITY[self.v_mat]
+        # density layering between different liquids (oil floats on water)
         below_liq = self._bshift(ph, g, 0) == M.P_LIQUID
         below_dens = self._bshift(dens, g, 0)
-        sink = below_liq & (dens > below_dens) & (rnd < 0.4)
-        fall = liq & (self.v_moved == 0) & below_free & ~dribble
-        n += self._apply_moves(fall, g, 0)
-        real_work |= fall               # gravity-driven moves, for levelling
-        # density layering swaps are NOT "real work" for the levelling
-        # window below — oil shuffling on the ocean would hold it open
-        # forever while creep re-mixes what sinking un-mixes
-        n_sink = self._apply_moves(liq & sink & ~below_free & ~dribble, g, 0)
+        sink = liq & (self.v_moved == 0) & below_liq & \
+            (dens > below_dens) & (rnd < 0.4)
+        n = self._apply_moves(sink, g, 0)
+        # discrete bulk transport: falling, diagonal slumping and pouring
+        # over edges move whole cells (their mass rides along in the swap).
+        # This is what makes splashes lively and towers collapse fast —
+        # the mass automaton below is diffusive and only excels at the
+        # fine grade: pressure, U-tubes and dead-level surfaces.
+        free = ph <= M.P_GAS
+        fall = liq & (self.v_moved == 0) & self._bshift(free, g, 0)
+        # falling does NOT renew the rest budget: the vertical mass work
+        # below does that where it matters. Otherwise one air bubble
+        # circulating inside a sealed pocket re-arms the lateral rules
+        # forever and buried oil/nitro pockets never sleep.
+        n += self._apply_moves(fall, g, 0, reset_rest=False)
         d = 1 if parity else -1
-        # diagonal slump runs every substep; everything below is lateral
+        # slumping and pouring spend the rest budget instead of renewing
+        # it: fresh splashes are lively (rest 0), but a settled shoreline
+        # can't ping-pong its own edge cells awake forever
+        awake = self.v_rest < self.REST_K
         for dd in (d, -d):
             ph = self.v_phase
-            liq = ph == M.P_LIQUID
+            liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0) & awake
             free = ph <= M.P_GAS
-            ok = liq & self._bshift(free, g, dd) & ~cling & \
-                (rnd > visc * 0.5)
-            real_work |= ok
-            n += self._apply_moves(ok, g, dd)
-        if not lateral:
-            if n:
-                self._mark_level_work(real_work)
-            return n + n_sink
-        # ---- communicating vessels: the hydrostatic HEAD plane ----------
-        # head[cell] = y of the highest water surface connected to this
-        # cell through liquid, min-propagated 6 steps per tick on a
-        # persistent plane (rebuilt every 64 ticks so stale pressure dies
-        # when its source column drains). Two rules act on it:
-        #  - FLOW: any cell whose connected head stands >= 2 rows higher
-        #    squeezes through an open side — tanks drain through tunnels,
-        #    plugs inside pipes keep getting pushed.
-        #  - RISE: a surface cell with head >= 3 rows higher climbs — the
-        #    water comes back UP on the far side of the gap. The inflow
-        #    that the same pressure drives refills the bubble it leaves.
-        # At equilibrium (differences < 2) neither rule has candidates,
-        # so settled pools still go fully to sleep.
-        if g == 1:
-            # the head solver runs on a 1-cell-extended window so values
-            # PERSISTED outside the active region leak back in as boundary
-            # conditions. A sleeping reservoir doesn't move, so its stored
-            # head is still valid — without this, the pressure source
-            # vanishes the moment the wake box shrinks away from it.
-            ry0, ry1, rx0, rx1 = self.last_region
-            ey0, ey1 = max(0, ry0 - 1), min(self.h, ry1 + 1)
-            ex0, ex1 = max(0, rx0 - 1), min(self.w, rx1 + 1)
-            hde = self.head[ey0:ey1, ex0:ex1]
-            if self.tick % 64 == 0:
-                # rebuild kills stale pressure, but must SPARE the window
-                # border: that's where a sleeping reservoir's stored head
-                # leaks in, and wiping it would cut the only line to a
-                # pressure source outside the active region. The border
-                # ages by 1 instead, so true ghosts still fade away.
-                hde[1:-1, 1:-1] = 65535
-                for sl in (hde[0, :], hde[-1, :], hde[:, 0], hde[:, -1]):
-                    np.copyto(sl, sl + 1, where=sl < 65535)
-            phe = M.PHASE[self.mat[ey0:ey1, ex0:ex1]]
-            lqe = phe == M.P_LIQUID
-            fre = phe <= M.P_GAS
-            sfe = lqe & shift(fre, -1, 0, ey0 == 0)
-            yye = (np.arange(ey0, ey1, dtype=np.uint16))[:, None]
-            np.minimum(hde, np.where(sfe, yye, np.uint16(65535)), out=hde)
-            blocked = ~lqe
-            hde[blocked] = 65535
-            # in-place slice minimums (no shift allocations); the barrier
-            # reset after EVERY direction is load-bearing — without it the
-            # head value leaks one cell per sweep through solid walls and
-            # water starts pressurizing across thin rock
-            if self.tick % 2 == 0:
-                for _ in range(4):
-                    np.minimum(hde[1:], hde[:-1], out=hde[1:])
-                    hde[blocked] = 65535
-                    np.minimum(hde[:-1], hde[1:], out=hde[:-1])
-                    hde[blocked] = 65535
-                    np.minimum(hde[:, 1:], hde[:, :-1], out=hde[:, 1:])
-                    hde[blocked] = 65535
-                    np.minimum(hde[:, :-1], hde[:, 1:], out=hde[:, :-1])
-                    hde[blocked] = 65535
-            # crop the extended window back to the region for the rules
-            oy, ox = ry0 - ey0, rx0 - ex0
-            hd = hde[oy:oy + (ry1 - ry0), ox:ox + (rx1 - rx0)]
-            surfm = sfe[oy:oy + (ry1 - ry0), ox:ox + (rx1 - rx0)]
-            yy = (np.arange(ry0, ry1, dtype=np.int32))[:, None]
-            deep = hd.astype(np.int32) <= yy - 2
-            # two flow rounds per tick: pipe transport works by bubbles
-            # walking backwards through the duct one cell per round, so
-            # this directly doubles tunnel throughput
-            for _ in range(2):
-                for dd in (d, -d):
-                    ph = self.v_phase
-                    liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
-                    flow = liq2 & deep & ~cling & \
-                        self._bshift(ph <= M.P_GAS, 0, dd) & (rnd > visc)
-                    real_work |= flow
-                    n += self._apply_moves(flow, 0, dd)
-            ph = self.v_phase
-            liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
-            # during mapgen pre-settle only coarse differences equalize:
-            # chasing every 3-cell pond across the whole map would keep
-            # the full-map region hot for tens of seconds of load time.
-            # In-game the leftovers wake and finish the moment anything
-            # disturbs them.
-            min_drop = 6 if self.settle_mode else 3
-            rise = liq2 & surfm & ~cling & \
-                (hd.astype(np.int32) <= yy - min_drop) & \
-                (rnd < 0.15) & (rnd > visc)
-            if rise.any():
-                # column siphon: the cell that actually moves up is the
-                # FOOT of the connected water column below the rising
-                # surface (water is indistinguishable, the net result is
-                # identical) — so the bubble opens at the bottom, in the
-                # high-pressure zone where sideways flow refills it at
-                # once, instead of right under the lifted cell where the
-                # only thing that can fill it is the cell falling back.
-                liqM = ph == M.P_LIQUID
-                below = np.maximum.accumulate(rise, axis=0)
-                broken = np.maximum.accumulate(below & ~liqM, axis=0)
-                chain = below & liqM & ~broken
-                cols = np.nonzero(rise.any(axis=0))[0]
-                top = rise.argmax(axis=0)[cols] - 1        # air above surface
-                yg = np.arange(chain.shape[0], dtype=np.int32)[:, None]
-                foot = np.where(chain, yg, -1).max(axis=0)[cols]
-                for a in (self.v_mat, self.v_shade, self.v_life, self.v_burn,
-                          self.v_temp, self.v_phase, self.v_dens, self.v_rest):
-                    tmp = a[top, cols].copy()
-                    a[top, cols] = a[foot, cols]
-                    a[foot, cols] = tmp
-                self.v_moved[top, cols] = 1
-                self.v_moved[foot, cols] = 1
-                self.v_rest[top, cols] = 0
-                self.v_rest[foot, cols] = 0
-                oy2, ox2 = self._ry0, self._rx0
-                self.wake(ox2 + int(cols.min()) - 1,
-                          oy2 + int(top.min()) - 1,
-                          ox2 + int(cols.max()) + 1,
-                          oy2 + int(foot.max()) + 1)
-                real_work |= rise
-                n += len(cols)
-        # lateral flow. Pouring over an edge is real flow (always allowed,
-        # resets rest); sloshing on flat ground is gated by the rest counter
-        # so big pools go to sleep instead of jittering forever.
-        n_flat = 0
+            ok = liq2 & self._bshift(free, g, dd) & (rnd > visc * 0.5)
+            n += self._apply_moves(ok, g, dd, reset_rest=False)
         for dd in (d, -d):
             ph = self.v_phase
+            liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0) & awake
             free = ph <= M.P_GAS
-            liq = (ph == M.P_LIQUID) & (self.v_moved == 0) & ~cling
-            grounded = liq & ~self._bshift(free, g, 0)
-            side_free = self._bshift(free, 0, dd) & (rnd > visc) & \
-                ((rnd < 0.5) if dd == d else (rnd >= 0.5))
-            pour = self._bshift(free, g, dd)
-            pouring = grounded & side_free & pour
-            if pouring.any():
-                # a pour hands its rest budget to the cells next in line
-                # (uphill and above), so a draining mound keeps flowing
-                # from the edge inward instead of aging out mid-cascade
-                heir = self._bshift(pouring, 0, dd) | self._bshift(pouring, g, 0)
-                self.v_rest[heir] = 0
-            real_work |= pouring
-            n += self._apply_moves(pouring, 0, dd)
-            ph = self.v_phase
-            liq = (ph == M.P_LIQUID) & (self.v_moved == 0) & ~cling
-            grounded = liq & ~self._bshift(ph <= M.P_GAS, g, 0)
-            flat = grounded & side_free & ~pour & \
-                (self.v_rest < self.REST_K)
-            n_flat += self._apply_moves(flat, 0, dd, reset_rest=False)
-        # gravity did real work this tick (falls, slumps, pours — but NOT
-        # flat sloshing or density layering): open the levelling window
-        # WHERE it happened. While a spot stays inside the window box,
-        # terrace creep below flattens stepped domes the pour rule can't
-        # see; a far-away brook must not keep the whole ocean creeping,
-        # and once the splash zone calms down nothing re-opens its box.
-        # The box + deadline are plain sim state for lockstep snapshots.
-        if n:
-            self._mark_level_work(real_work)
-        n += n_flat + n_sink
-        # surface levelling: a surface cell slides one column downhill.
-        # The always-on rule needs two monotonically descending columns
-        # (so settled ripples can't trigger it); the boxed creep rule
-        # also takes slope-1 terrace edges, eroding domes completely.
-        creep_on = self.tick < self.level_until and self.level_box
-        if creep_on:
-            lb = self.level_box
-            inbox = np.zeros_like(liq)
-            y0 = max(0, lb[0] - self._ry0); y1 = max(0, lb[1] - self._ry0)
-            x0 = max(0, lb[2] - self._rx0); x1 = max(0, lb[3] - self._rx0)
-            inbox[y0:y1, x0:x1] = True
-        for dd in (d, -d):
-            ph = self.v_phase
-            free = ph <= M.P_GAS
-            # supported on liquid OR solid, both under the cell and at the
-            # destination: surface steps must be able to march across stone
-            # blobs and ledges, or scattered rocks pin a tilted surface in
-            # place forever (each one parking a step it can't cross)
-            surf = (ph == M.P_LIQUID) & (self.v_moved == 0) & ~cling & \
-                ~self._bshift(free, g, 0) & \
-                self._bshift(free, -g, 0) & \
-                self._bshift(free, 0, dd) & \
-                ~self._bshift(free, g, dd) & \
-                (rnd > visc) & ((rnd < 0.5) if dd == d else (rnd >= 0.5))
-            slide = surf & self._bshift(free, g, 2 * dd)
-            n += self._apply_moves(slide, 0, dd)
-            if creep_on:
-                # creep fills one-cell hollows too (that's how ripples
-                # annihilate). It keeps the region awake only while the
-                # levelling window is open — the window itself only stays
-                # open while real gravity work happens, so a flat pool
-                # still winds down and sleeps within a couple of seconds.
-                creep = surf & inbox & ~slide & \
-                    ~self._bshift(free, 0, -dd)
-                n += self._apply_moves(creep, 0, dd, reset_rest=False)
+            pour = liq2 & ~self._bshift(free, g, 0) & \
+                self._bshift(free, 0, dd) & self._bshift(free, g, dd) & \
+                (rnd > visc)
+            n += self._apply_moves(pour, 0, dd, reset_rest=False)
+        # fine grade: the compressible-mass automaton
+        ph = self.v_phase
+        liq = ph == M.P_LIQUID
+        for art in np.unique(self.v_mat[liq]):
+            n += self._mass_flow(int(art), g)
         return n
+
+    def _mass_flow(self, art, g):
+        mat, ph = self.v_mat, self.v_phase
+        mine = mat == art
+        # air-borne residue mass joins whichever liquid works the area
+        carry = mine | (ph == M.P_EMPTY)
+        m = np.where(carry, np.maximum(self.v_lmass, np.float32(0.0)),
+                     np.float32(0.0))
+        # where this liquid may spread: empty cells, gas (displaced), self
+        open_ = (ph == M.P_EMPTY) | (ph == M.P_GAS) | mine
+        rate = np.float32(1.0 - M.VISCOSITY[art])
+        if M.STICKY[art] > 0:
+            stat = ph == M.P_STATIC
+            near = (self._bshift(stat, 0, 1) | self._bshift(stat, 0, -1) |
+                    self._bshift(stat, g, 0) | self._bshift(stat, -g, 0))
+            ratem = np.where(near, rate * np.float32(1.0 - M.STICKY[art] * 0.9),
+                             rate)
+        else:
+            ratem = rate
+        # DOWN: settle toward the two-cell stable distribution
+        mb = shift(m, g, 0, 0.0)
+        dn = np.clip(self._stable_bottom(m + mb) - mb, 0.0, m) * ratem
+        dn[~(carry & self._bshift(open_, g, 0))] = 0.0
+        # SIDEWAYS: equalize with each neighbour by a quarter of the gap.
+        # Thin films stop creeping below LMIN_SEE so pools don't smear out
+        # into invisible sheets across the whole map. Lateral diffusion
+        # also spends the rest budget: vertical work (compression, rises)
+        # keeps re-arming it, pure sideways wandering dies out and lets
+        # big waters go back to sleep.
+        # only REAL cells spread sideways: air residue may only sink
+        # (dn uses `carry`) until a pool absorbs it — otherwise every
+        # liquid species in the region keeps shuffling the same residue
+        # back and forth forever and the map never sleeps
+        spread_ok = mine & (m > self.LMIN_SEE) & \
+            (self.v_rest < self.REST_K * 4)
+        ml = shift(m, 0, -1, 0.0)
+        sl = np.clip((m - ml) * np.float32(0.25), 0.0, m) * ratem
+        sl[~(spread_ok & self._bshift(open_, 0, -1))] = 0.0
+        mr = shift(m, 0, 1, 0.0)
+        sr = np.clip((m - mr) * np.float32(0.25), 0.0, m) * ratem
+        sr[~(spread_ok & self._bshift(open_, 0, 1))] = 0.0
+        # UP: only compressed mass rises — this is the pressure release
+        ma = shift(m, -g, 0, 0.0)
+        up = np.clip(m - self._stable_bottom(m + ma), 0.0, m) * ratem
+        up[~(mine & self._bshift(open_, -g, 0))] = 0.0
+        # NOTE: residue in air may fall and spread but never pushes UP —
+        # only real, visible water carries pressure
+        # conservation: never ship more than the cell holds
+        out = dn + sl + sr + up
+        over = (out > m) & (out > 0)
+        if over.any():
+            f = m[over] / out[over]
+            dn[over] *= f; sl[over] *= f; sr[over] *= f; up[over] *= f
+        for fl in (dn, sl, sr, up):
+            fl[fl < self.LFLOW_MIN] = 0.0
+        moved = (dn > 0) | (sl > 0) | (sr > 0) | (up > 0)
+        if not moved.any():
+            return 0
+        # vertical mass work is real gravity/pressure activity: refresh
+        # the rest clock there (and at the receiving cells)
+        vert = (dn > 0.01) | (up > 0.01)
+        if vert.any():
+            self.v_rest[vert] = 0
+            self.v_rest[shift(dn, -g, 0, 0.0) > 0.01] = 0
+            self.v_rest[shift(up, g, 0, 0.0) > 0.01] = 0
+        new_m = m - (dn + sl + sr + up)
+        new_m += shift(dn, -g, 0, 0.0)
+        new_m += shift(sl, 0, 1, 0.0)
+        new_m += shift(sr, 0, -1, 0.0)
+        new_m += shift(up, g, 0, 0.0)
+        # materialize / evaporate cells from the mass field (hysteresis)
+        appear = ~mine & (new_m > self.LMIN_SEE) & open_
+        vanish = mine & (new_m < self.LMIN_KEEP)
+        if appear.any():
+            mat[appear] = art
+            self.v_phase[appear] = M.P_LIQUID
+            self.v_dens[appear] = M.DENSITY[art]
+            self.v_shade[appear] = self.v_tex[appear]
+            self.v_life[appear] = 0
+            self.v_burn[appear] = 0
+        if vanish.any():
+            # the CELL evaporates, its residue mass stays in the air cell
+            # and gets re-collected — mass is conserved
+            mat[vanish] = M.EMPTY
+            self.v_phase[vanish] = M.P_EMPTY
+            self.v_dens[vanish] = 0
+        # relief valve: nothing holds more than the deepest legitimate
+        # hydrostatic load — impact zones under a hose otherwise build
+        # monster cells that then read as a sunken water level
+        cap = self.LMAX + 60 * self.LCOMP
+        burst = new_m > cap
+        if burst.any():
+            exc = np.where(burst, new_m - cap, np.float32(0.0))
+            target_open = shift(open_ | mine, g, 0, False)
+            exc[~target_open] = 0.0
+            new_m -= exc
+            new_m += shift(exc, g, 0, 0.0)
+        write = carry | appear | (new_m != m)
+        self.v_lmass[write] = new_m[write]
+        touched = moved | appear | vanish
+        self._wake_mask(touched, self._ry0, self._rx0)
+        return int(np.count_nonzero(moved))
 
     def _gas_pass(self, parity):
         ph, rnd = self.v_phase, self.v_rnd
@@ -896,84 +855,84 @@ class World:
     def step(self):
         self.tick += 1
         moves = 0
-        # anti-stall: while the levelling window is open, re-pulse its box
-        # awake every 16 ticks. Probability-gated flow can hit a quiet
-        # streak mid-equalization and the wake box would die with real
-        # pressure differences left; the pulse gives the spot fresh tries
-        # until the window itself expires (then everything truly sleeps).
-        if self.tick < self.level_until and self.level_box and \
-                self.tick % 16 == 0 and not self.settle_mode:
-            lb = self.level_box
-            self.wake(lb[2], lb[0], lb[3], lb[1])
-        box = self._wake_box
-        self._wake_box = None
+        boxes = self._wake_boxes
+        self._wake_boxes = []
         self.last_region = None
         # box hysteresis: many flow rules are probability-gated, so a few
         # remaining candidates can all skip one tick by chance — without a
         # grace period that single quiet tick would freeze them forever
-        if box is None and self._wake_cool > 0:
+        if not boxes and self._wake_cool > 0:
             self._wake_cool -= 1
-            box = self._cool_box
-        elif box is not None:
+            boxes = [list(b) for b in self._cool_boxes]
+        elif boxes:
             self._wake_cool = 10
-            self._cool_box = list(box)
-        if box is not None:
-            y0 = max(0, box[0] - self.MARGIN)
-            y1 = min(self.h, box[1] + self.MARGIN)
-            x0 = max(0, box[2] - self.MARGIN)
-            x1 = min(self.w, box[3] + self.MARGIN)
-            self.last_region = (y0, y1, x0, x1)
-            self._ry0, self._rx0 = y0, x0
-            sy, sx = slice(y0, y1), slice(x0, x1)
-            # refresh the phase/density mirrors inside the region only;
-            # outside it nothing moves, so stale values are never read.
-            self.phase[sy, sx] = M.PHASE[self.mat[sy, sx]]
-            self.dens[sy, sx] = M.DENSITY[self.mat[sy, sx]]
-            self.v_mat = self.mat[sy, sx]
-            self.v_shade = self.shade[sy, sx]
-            self.v_life = self.life[sy, sx]
-            self.v_burn = self.burn[sy, sx]
-            self.v_rest = self.rest[sy, sx]
-            self.v_head = self.head[sy, sx]
-            self.v_temp = self.temp[sy, sx]
-            self.v_phase = self.phase[sy, sx]
-            self.v_dens = self.dens[sy, sx]
-            self.v_moved = self.moved[sy, sx]
-            self.v_rnd = self.rng.random((y1 - y0, x1 - x0), dtype=np.float32)
-            for s in range(SIM_SUBSTEPS):
-                self.v_moved[:] = 0
-                parity = (self.tick + s) % 2 == 0
-                moves += self._powder_pass(parity, lateral=(s == 0))
-                moves += self._liquid_pass(parity, lateral=(s == 0))
-            self.v_moved[:] = 0
-            moves += self._gas_pass(self.tick % 2 == 0)
-            # every fluid cell ages toward rest; real flow resets the clock
-            ph = self.v_phase
-            fluid = (ph == M.P_LIQUID) | (ph == M.P_GAS)
-            inc = fluid & (self.v_rest < 255)
-            self.v_rest[inc] += 1
-            # reactions only happen where something is awake. During the
-            # mapgen pre-settle the destructive chemistry pauses — fire,
-            # acid and heat — so lava doesn't burn down the scenery before
-            # the players arrive. Gases still age out and water still
-            # quenches lava, or the settle would never go quiet.
-            if not self.settle_mode:
-                self._fire_pass()
-                if self.tick % 2 == 0:
-                    self._acid_pass()
-                if self.tick % 2 == 1:
-                    self._temp_pass()
-            self._water_lava_pass()
-            self._gas_life_pass()
+            self._cool_boxes = [list(b) for b in boxes]
+        for box in boxes:
+            moves += self._step_region(box)
         self._run_detonations()
         self.activity = moves
+
+    def _step_region(self, box):
+        """Run one tick of simulation inside one active box. Distant
+        activity pockets get their own small boxes (a brook on the left
+        must not stretch the region across a sleeping ocean)."""
+        moves = 0
+        y0 = max(0, box[0] - self.MARGIN)
+        y1 = min(self.h, box[1] + self.MARGIN)
+        x0 = max(0, box[2] - self.MARGIN)
+        x1 = min(self.w, box[3] + self.MARGIN)
+        self.last_region = (y0, y1, x0, x1)
+        self._ry0, self._rx0 = y0, x0
+        sy, sx = slice(y0, y1), slice(x0, x1)
+        # refresh the phase/density mirrors inside the region only;
+        # outside it nothing moves, so stale values are never read.
+        self.phase[sy, sx] = M.PHASE[self.mat[sy, sx]]
+        self.dens[sy, sx] = M.DENSITY[self.mat[sy, sx]]
+        self.v_mat = self.mat[sy, sx]
+        self.v_shade = self.shade[sy, sx]
+        self.v_life = self.life[sy, sx]
+        self.v_burn = self.burn[sy, sx]
+        self.v_rest = self.rest[sy, sx]
+        self.v_lmass = self.lmass[sy, sx]
+        self.v_tex = self.tex[sy, sx]
+        self.v_temp = self.temp[sy, sx]
+        self.v_phase = self.phase[sy, sx]
+        self.v_dens = self.dens[sy, sx]
+        self.v_moved = self.moved[sy, sx]
+        self.v_rnd = self.rng.random((y1 - y0, x1 - x0), dtype=np.float32)
+        for s in range(SIM_SUBSTEPS):
+            self.v_moved[:] = 0
+            parity = (self.tick + s) % 2 == 0
+            moves += self._powder_pass(parity, lateral=(s == 0))
+            moves += self._liquid_pass(parity, lateral=(s == 0))
+        self.v_moved[:] = 0
+        moves += self._gas_pass(self.tick % 2 == 0)
+        # every fluid cell ages toward rest; real flow resets the clock
+        ph = self.v_phase
+        fluid = (ph == M.P_LIQUID) | (ph == M.P_GAS)
+        inc = fluid & (self.v_rest < 255)
+        self.v_rest[inc] += 1
+        # reactions only happen where something is awake. During the
+        # mapgen pre-settle the destructive chemistry pauses — fire,
+        # acid and heat — so lava doesn't burn down the scenery before
+        # the players arrive. Gases still age out and water still
+        # quenches lava, or the settle would never go quiet.
+        if not self.settle_mode:
+            self._fire_pass()
+            if self.tick % 2 == 0:
+                self._acid_pass()
+            if self.tick % 2 == 1:
+                self._temp_pass()
+        self._water_lava_pass()
+        self._gas_life_pass()
+        return moves
 
     # ------------------------------------------------------------ snapshot
     def to_bytes(self) -> bytes:
         payload = b"".join([
             self.mat.tobytes(), self.shade.tobytes(), self.life.tobytes(),
             self.burn.tobytes(), self.rest.tobytes(),
-            self.head.astype(np.uint16).tobytes(),
+            self.lmass.astype(np.float32).tobytes(),
             self.temp.astype(np.float32).tobytes(),
         ])
         return zlib.compress(payload, 6)
@@ -986,5 +945,5 @@ class World:
         self.life = np.frombuffer(raw[2*n:3*n], np.uint8).reshape(self.h, self.w).copy()
         self.burn = np.frombuffer(raw[3*n:4*n], np.uint8).reshape(self.h, self.w).copy()
         self.rest = np.frombuffer(raw[4*n:5*n], np.uint8).reshape(self.h, self.w).copy()
-        self.head = np.frombuffer(raw[5*n:7*n], np.uint16).reshape(self.h, self.w).copy()
-        self.temp = np.frombuffer(raw[7*n:7*n+4*n], np.float32).reshape(self.h, self.w).copy()
+        self.lmass = np.frombuffer(raw[5*n:9*n], np.float32).reshape(self.h, self.w).copy()
+        self.temp = np.frombuffer(raw[9*n:13*n], np.float32).reshape(self.h, self.w).copy()
