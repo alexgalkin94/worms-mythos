@@ -127,12 +127,16 @@ class LabRig:
 
 MAPS_DIR = os.path.join(os.getcwd(), "maps")
 
-PALETTE_ITEMS = [
-    M.EMPTY, M.STONE, M.DIRT, M.SAND, M.METAL, M.WOOD, M.ICE, M.GLASS,
-    M.GRASS, M.CRYSTAL, M.GRAVEL, M.SNOW, M.EXPOWDER, M.WATER, M.OIL,
-    M.ACID, M.LAVA, M.SLUDGE, M.SLIME, M.MAGIC, M.NITRO, M.NAPALM,
-    M.GAS, M.TOXGAS, M.FIRE,
+# palette grouped the way the panel draws it: solids, powders, fluids, fire
+PALETTE_GROUPS = [
+    ("SOLID", [M.STONE, M.DIRT, M.METAL, M.WOOD, M.ICE,
+               M.GLASS, M.GRASS, M.CRYSTAL]),
+    ("POWDER", [M.SAND, M.GRAVEL, M.SNOW, M.ASH, M.EXPOWDER]),
+    ("LIQUID", [M.WATER, M.OIL, M.ACID, M.LAVA, M.SLUDGE,
+                M.SLIME, M.MAGIC, M.NITRO, M.NAPALM]),
+    ("GAS+", [M.GAS, M.TOXGAS, M.SMOKE, M.STEAM, M.FIRE]),
 ]
+PALETTE_ITEMS = [m for _, row in PALETTE_GROUPS for m in row]
 
 
 def list_custom_maps():
@@ -158,6 +162,14 @@ def load_map_into(world, path):
     world._wake_box = [0, world.h, 0, world.w]
 
 
+PANEL_W = 112          # right-hand lab kit panel
+SPAWN_TOOLS = [        # (label, tool id, hotkey hint)
+    ("GRUB", "grub", "G"), ("BOOM", "boom", "E"),
+    ("CRATE", "crate", "K"), ("PLANK", "plank", ""),
+    ("BLOCK", "block", ""), ("BEAM", "beam", ""),
+]
+
+
 class SandboxScreen:
     def __init__(self, app):
         self.app = app
@@ -172,17 +184,77 @@ class SandboxScreen:
         self.save_n = len(list_custom_maps())
         self.msg = ""
         self.msg_t = 0
+        self.panel = True              # TAB hides the lab kit
+        self.tool = "paint"            # paint | grub | crate/... | boom | fire
+        self._hover_name = ""
 
         class _LabSpec:
             light = 0.85
         self._spec = _LabSpec()
 
+    # ------------------------------------------------------------- actions
+    def _flash(self, text, ttl=160):
+        self.msg, self.msg_t = text, ttl
+
+    def _spawn_at(self, tool, x, y):
+        if tool == "grub":
+            if len(self.rig.grubs) < 6:
+                g = Grub(x, y, "TESTER", 0, 100)
+                self.rig.grubs.append(g)
+                self.rig.active_grub = g
+        elif tool in ("crate", "plank", "block", "beam"):
+            self.rig.bodies.append(RigidBody(x, y, tool))
+        elif tool == "boom":
+            self.rig.apply_explosion(x, y, 14, 60, fire=True)
+            self.app.audio.play("boom", 0.8)
+            self.app.renderer.camera.kick(2)
+        elif tool == "fire":
+            self._fire_test(x, y)
+
+    def _fire_test(self, tx=None, ty=None):
+        g = self.rig.active_grub
+        ui = self.app.ui
+        if g is None or not g.alive:
+            self._flash("spawn a GRUB first — it does the shooting")
+            return
+        tx = ui.mx if tx is None else tx
+        ty = ui.my if ty is None else ty
+        spec = WEAPONS[self.weapon_i]
+        ang = math.atan2(ty - g.y, tx - g.x)
+        spec.fire_fn(self.rig, g, ang, 0.75, (int(tx), int(ty)))
+        self.app.audio.play("shoot", 0.5)
+
+    def _save(self):
+        self.save_n += 1
+        save_map(self.world, f"lab_{self.save_n:03d}")
+        self._flash(f"saved maps/lab_{self.save_n:03d}.npz — "
+                    f"playable from match setup!", 260)
+
+    def _clear(self):
+        self.world.mat[1:-1, 1:-1] = M.EMPTY
+        self.world._wake_box = [0, self.world.h, 0, self.world.w]
+        self.rig.grubs.clear()
+        self.rig.bodies.clear()
+        self.rig.projectiles.clear()
+        self.rig.entities.clear()
+        self.rig.active_grub = None
+
+    def _over_panel(self, ui):
+        return self.panel and ui.mx >= GRID_W - PANEL_W
+
+    # -------------------------------------------------------------- update
     def update(self, events):
+        ui = self.app.ui
         for e in events:
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
-                    from .app import MainMenu
-                    self.app.goto(MainMenu(self.app))
+                    if self.tool != "paint":
+                        self.tool = "paint"
+                    else:
+                        from .app import MainMenu
+                        self.app.goto(MainMenu(self.app))
+                elif e.key == pygame.K_TAB:
+                    self.panel = not self.panel
                 elif e.key == pygame.K_LEFTBRACKET:
                     self.brush = max(1, self.brush - 2)
                 elif e.key == pygame.K_RIGHTBRACKET:
@@ -190,47 +262,49 @@ class SandboxScreen:
                 elif e.key == pygame.K_p:
                     self.running = not self.running
                 elif e.key == pygame.K_e:
-                    ui = self.app.ui
-                    self.rig.apply_explosion(ui.mx, ui.my, 14, 60, fire=True)
-                    self.app.audio.play("boom", 0.8)
-                    self.app.renderer.camera.kick(2)
+                    self._spawn_at("boom", ui.mx, ui.my)
                 elif e.key == pygame.K_g:
-                    ui = self.app.ui
-                    if len(self.rig.grubs) < 4:
-                        g = Grub(ui.mx, ui.my, "TESTER", 0, 100)
-                        self.rig.grubs.append(g)
-                        self.rig.active_grub = g
+                    self._spawn_at("grub", ui.mx, ui.my)
                 elif e.key == pygame.K_k:
-                    ui = self.app.ui
-                    self.rig.bodies.append(RigidBody(ui.mx, ui.my, "crate"))
+                    self._spawn_at("crate", ui.mx, ui.my)
                 elif e.key == pygame.K_q:
                     self.weapon_i = (self.weapon_i - 1) % len(WEAPONS)
                 elif e.key == pygame.K_f:
                     self._fire_test()
                 elif e.key == pygame.K_c:
-                    self.world.mat[1:-1, 1:-1] = M.EMPTY
-                    self.world._wake_box = [0, self.world.h, 0, self.world.w]
+                    self._clear()
                 elif e.key == pygame.K_F5 or e.key == pygame.K_o:
-                    self.save_n += 1
-                    save_map(self.world, f"lab_{self.save_n:03d}")
-                    self.msg = f"saved maps/lab_{self.save_n:03d}.npz " \
-                               f"(playable from match setup!)"
-                    self.msg_t = 240
-        ui = self.app.ui
-        if ui.my < GRID_H - 26:                  # don't paint through the bar
-            if pygame.mouse.get_pressed()[0] and not ui.clicked or \
-                    (pygame.mouse.get_pressed()[0] and ui.my < GRID_H - 26):
+                    self._save()
+            elif e.type == pygame.MOUSEWHEEL:
+                self.brush = max(1, min(25, self.brush + e.y))
+            elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 2:
+                m = self.world.get(ui.mx, ui.my)      # eyedropper
+                if m in PALETTE_ITEMS:
+                    self.mat = m
+                    self.tool = "paint"
+                    self._flash(f"picked {M.NAMES[m]}", 70)
+        # world interaction (never through the panel)
+        if not self._over_panel(ui):
+            if self.tool != "paint":
+                if ui.clicked:
+                    self._spawn_at(self.tool, ui.mx, ui.my)
+                    if self.tool in ("boom", "fire"):
+                        pass                     # keep blasting on click
+                    else:
+                        self.tool = "paint"
+            elif pygame.mouse.get_pressed()[0]:
                 self.world.paint(ui.mx, ui.my, self.brush, self.mat,
-                                 mode="replace" if self.mat != M.EMPTY else "erase")
-            elif pygame.mouse.get_pressed()[2]:
-                self.world.paint(ui.mx, ui.my, self.brush, M.EMPTY, mode="erase")
+                                 mode="replace" if self.mat != M.EMPTY
+                                 else "erase")
+            if pygame.mouse.get_pressed()[2]:
+                self.world.paint(ui.mx, ui.my, self.brush, M.EMPTY,
+                                 mode="erase")
         if self.running:
             keys = pygame.key.get_pressed()
             inp = InputFrame()
             inp.left = keys[pygame.K_a]
             inp.right = keys[pygame.K_d]
             inp.jump = keys[pygame.K_SPACE]
-            ui = self.app.ui
             g = self.rig.active_grub
             if g is not None and g.alive:
                 a = math.atan2(ui.my - g.y, ui.mx - g.x)
@@ -240,20 +314,15 @@ class SandboxScreen:
         if self.msg_t > 0:
             self.msg_t -= 1
 
-    def _fire_test(self):
-        g = self.rig.active_grub
-        if g is None or not g.alive:
-            return
-        ui = self.app.ui
-        spec = WEAPONS[self.weapon_i]
-        ang = math.atan2(ui.my - g.y, ui.mx - g.x)
-        spec.fire_fn(self.rig, g, ang, 0.75, (int(ui.mx), int(ui.my)))
-        self.app.audio.play("shoot", 0.5)
-
+    # ---------------------------------------------------------------- draw
     def draw(self, view):
         app, ui = self.app, self.app.ui
-        view.fill((12, 12, 22))
-        # cells (reuse renderer compose path on a bare world)
+        view.fill((11, 11, 19))
+        # blueprint grid so empty space reads as lab, not void
+        for gx in range(0, GRID_W, 24):
+            pygame.draw.line(view, (16, 17, 30), (gx, 0), (gx, GRID_H))
+        for gy in range(0, GRID_H, 24):
+            pygame.draw.line(view, (16, 17, 30), (0, gy), (GRID_W, gy))
         r = app.renderer
         r._t += 1
         changed = r.refresh_cells(self.world)
@@ -261,7 +330,6 @@ class SandboxScreen:
             r._rebuild_light(self.world, self._spec)
             r._light_built = True
         view.blit(r.cell_surf, (0, 0))
-        # rig actors live between solids and translucent liquids
         for g in self.rig.grubs:
             if g.alive:
                 r._draw_grub(self.rig, g, False)
@@ -274,38 +342,142 @@ class SandboxScreen:
         view.blit(r.liq_surf, (0, 0))
         view.blit(r.gas_surf, (0, 0))
         r._apply_light()
-        # brush cursor
-        pygame.draw.circle(view, (255, 255, 255), (ui.mx, ui.my),
-                           self.brush, 1)
-        # palette bar
-        bar = pygame.Rect(0, GRID_H - 26, GRID_W, 26)
-        pygame.draw.rect(view, (14, 14, 26), bar)
-        pygame.draw.line(view, (70, 70, 110), (0, bar.y), (GRID_W, bar.y))
-        x = 4
-        for m in PALETTE_ITEMS:
-            r2 = pygame.Rect(x, bar.y + 3, 17, 12)
-            col = tuple(int(c) for c in M.PALETTE[m][1]) if m else (30, 30, 40)
-            pygame.draw.rect(view, col, r2)
-            if m == self.mat:
-                pygame.draw.rect(view, (255, 255, 255), r2.inflate(2, 2), 1)
-            if r2.collidepoint(ui.mx, ui.my):
-                pygame.draw.rect(view, ACCENT, r2, 1)
-                ui.label(view, x, bar.y - 9, M.NAMES[m], FG, ui.font)
-                if ui.clicked:
-                    self.mat = m
-            x += 19
-        ui.label(view, 4, bar.y + 17,
-                 "LMB paint RMB erase [ ] brush E boom G grub K crate "
-                 "Q weapon F fire A/D/SPACE move O save ESC menu",
-                 DIM, ui.font)
-        ui.label(view, GRID_W - 130, bar.y - 9,
-                 f"weapon: {WEAPONS[self.weapon_i].name}", ACCENT, ui.font)
-        if self.msg_t > 0:
-            ui.label(view, GRID_W // 2, 8, self.msg, ACCENT2, ui.font_m,
-                     center=True)
+        self._draw_cursor(view, ui)
+        if self.panel:
+            self._draw_panel(view, ui)
+        self._draw_status(view, ui)
+
+    def _draw_cursor(self, view, ui):
+        if self._over_panel(ui):
+            return
+        if self.tool == "paint":
+            pygame.draw.circle(view, (255, 255, 255), (ui.mx, ui.my),
+                               self.brush, 1)
+        elif self.tool == "boom":
+            pygame.draw.circle(view, (255, 120, 60), (ui.mx, ui.my), 14, 1)
+            pygame.draw.line(view, (255, 120, 60), (ui.mx - 3, ui.my),
+                             (ui.mx + 3, ui.my))
+            pygame.draw.line(view, (255, 120, 60), (ui.mx, ui.my - 3),
+                             (ui.mx, ui.my + 3))
+        elif self.tool == "fire":
+            pygame.draw.circle(view, (255, 80, 80), (ui.mx, ui.my), 3, 1)
+            view.set_at((ui.mx, ui.my), (255, 220, 220))
+        else:                                   # spawn ghost
+            w, h = (5, 5) if self.tool == "grub" else \
+                {"crate": (7, 7), "plank": (16, 4), "block": (8, 6),
+                 "beam": (14, 3)}.get(self.tool, (7, 7))
+            pygame.draw.rect(view, ACCENT,
+                             (ui.mx - w // 2, ui.my - h // 2, w, h), 1)
+
+    def _draw_status(self, view, ui):
+        # one slim status line at the top, always visible
+        tool = self.tool.upper() if self.tool != "paint" \
+            else M.NAMES[self.mat].upper()
+        bits = f"{tool} · brush {self.brush}"
         if not self.running:
-            ui.label(view, GRID_W // 2, 20, "SIM PAUSED", ACCENT, ui.font_m,
-                     center=True)
+            bits += " · PAUSED (P)"
+        if not self.panel:
+            bits += " · TAB kit"
+        s = ui.font.render(bits, True, FG)
+        pygame.draw.rect(view, (10, 9, 14),
+                         (2, 2, s.get_width() + 8, 11))
+        view.blit(s, (6, 4))
+        if self.msg_t > 0:
+            ui.label(view, (GRID_W - (PANEL_W if self.panel else 0)) // 2, 18,
+                     self.msg, ACCENT2, ui.font_m, center=True)
+
+    def _draw_panel(self, view, ui):
+        x0 = GRID_W - PANEL_W
+        ui.panel(view, (x0, 0, PANEL_W, GRID_H), None)
+        ui.label(view, x0 + PANEL_W // 2, 4, "LAB KIT", ACCENT, ui.font_m,
+                 center=True)
+        y = 16
+        # ---- materials, grouped, with a fixed name line (no flicker) ----
+        hover_name = None
+        for gname, row in PALETTE_GROUPS:
+            ui.label(view, x0 + 8, y, gname, DIM, ui.font)
+            y += 7
+            for ri in range(0, len(row), 5):
+                cx = x0 + 8
+                for m in row[ri:ri + 5]:
+                    r2 = pygame.Rect(cx, y, 17, 10)
+                    col = tuple(int(c) for c in M.PALETTE[m][1])
+                    pygame.draw.rect(view, col, r2)
+                    pygame.draw.rect(view, (8, 8, 12), r2, 1)
+                    if m == self.mat and self.tool == "paint":
+                        pygame.draw.rect(view, (255, 255, 255),
+                                         r2.inflate(2, 2), 1)
+                    if r2.collidepoint(ui.mx, ui.my):
+                        hover_name = M.NAMES[m]
+                        pygame.draw.rect(view, ACCENT, r2.inflate(2, 2), 1)
+                        if ui.clicked:
+                            self.mat = m
+                            self.tool = "paint"
+                            self.app.audio.play("click", 0.4)
+                    cx += 19
+                y += 12
+            y += 2
+        name = hover_name or (M.NAMES[self.mat] if self.mat else "Eraser")
+        ui.label(view, x0 + PANEL_W // 2, y, name, FG, ui.font, center=True)
+        y += 9
+        # eraser + brush row
+        if ui.button(view, (x0 + 8, y, 42, 11), "ERASE",
+                     accent=(self.mat == M.EMPTY and self.tool == "paint"),
+                     font=ui.font):
+            self.mat = M.EMPTY
+            self.tool = "paint"
+        if ui.button(view, (x0 + 54, y, 13, 11), "-", font=ui.font):
+            self.brush = max(1, self.brush - 2)
+        ui.label(view, x0 + 71, y + 3, f"{self.brush:2d}", FG, ui.font)
+        if ui.button(view, (x0 + 86, y, 13, 11), "+", font=ui.font):
+            self.brush = min(25, self.brush + 2)
+        y += 15
+        # ---- spawn tools (click arms the stamp, click world to drop) ----
+        ui.label(view, x0 + 8, y, "DROP INTO THE WORLD", DIM, ui.font)
+        y += 8
+        for i, (label, tool, key) in enumerate(SPAWN_TOOLS):
+            bx = x0 + 8 + (i % 3) * 33
+            by = y + (i // 3) * 14
+            if ui.button(view, (bx, by, 31, 11), label,
+                         accent=(self.tool == tool), font=ui.font):
+                self.tool = tool if self.tool != tool else "paint"
+        y += 2 * 14 + 3
+        # ---- weapon test rig ----
+        ui.label(view, x0 + 8, y, "WEAPON TEST (needs grub)", DIM, ui.font)
+        y += 8
+        from .icons import weapon_icon
+        ic = weapon_icon(WEAPONS[self.weapon_i].key)
+        view.blit(ic, (x0 + 8, y))
+        if ui.button(view, (x0 + 24, y, 12, 11), "<", font=ui.font):
+            self.weapon_i = (self.weapon_i - 1) % len(WEAPONS)
+        if ui.button(view, (x0 + 38, y, 12, 11), ">", font=ui.font):
+            self.weapon_i = (self.weapon_i + 1) % len(WEAPONS)
+        if ui.button(view, (x0 + 54, y, 50, 11), "FIRE F",
+                     accent=(self.tool == "fire"), font=ui.font):
+            self.tool = "fire" if self.tool != "fire" else "paint"
+        y += 13
+        ui.label(view, x0 + 8, y, WEAPONS[self.weapon_i].name, ACCENT,
+                 ui.font)
+        y += 11
+        # ---- world actions ----
+        if ui.button(view, (x0 + 8, y, 46, 11),
+                     "RUN P" if not self.running else "PAUSE P",
+                     accent=not self.running, font=ui.font):
+            self.running = not self.running
+        if ui.button(view, (x0 + 58, y, 46, 11), "CLEAR C", font=ui.font):
+            self._clear()
+        y += 14
+        if ui.button(view, (x0 + 8, y, 46, 11), "SAVE O", accent=True,
+                     font=ui.font):
+            self._save()
+        if ui.button(view, (x0 + 58, y, 46, 11), "MENU", font=ui.font):
+            from .app import MainMenu
+            self.app.goto(MainMenu(self.app))
+        y += 15
+        for line in ("LMB paint  RMB erase  MMB pick",
+                     "wheel brush  TAB hide panel"):
+            ui.label(view, x0 + 8, y, line, DIM, ui.font)
+            y += 8
 
     def _draw_ps(self, view, ps):
         for i in ps.live_indices():
