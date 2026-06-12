@@ -187,10 +187,22 @@ def generate(biome: str, seed: int, w: int = GRID_W, h: int = GRID_H) -> MapSpec
     else:
         fn = _GENERATORS.get(biome, _gen_island)
         spec = fn(world, rng)
+    world.ambient = spec.ambient
+    # pre-settle: run the sim until the freshly painted world calms down —
+    # floods find their level, loose grains land, gas pockets rise. The
+    # match then opens on a quiet world instead of a mass earthquake (the
+    # settle is by far the most expensive phase the sim ever sees).
+    world._wake_box = [0, h, 0, w]
+    world.settle_mode = True
+    for _ in range(2400):
+        world.step()
+        if world._wake_box is None:
+            break
+    world.settle_mode = False
+    world.events.clear()
+    # spawns are found AFTER settling so nobody starts inside a pond
     spec.spawns = _find_spawns(world)
     spec.bodies = _place_props(world, rng)
-    world.ambient = spec.ambient
-    # let the freshly painted world have one full-grid wake
     world._wake_box = [0, h, 0, w]
     return spec
 

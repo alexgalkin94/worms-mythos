@@ -47,6 +47,9 @@ class World:
         self.ambient = 20.0
         self.gravity_dir = 1                       # -1 in gravity-invert chaos
         self.activity = 0                          # moved cells last tick
+        self.level_until = 0     # ticks: terrace creep allowed while open
+        self.level_box = None    # where the last real gravity work happened
+        self.settle_mode = False  # mapgen pre-settle: mechanics only
         self.pending_detonations: list[tuple[int, int, int]] = []  # x, y, mat
         self.events: list[dict] = []               # explosions etc, for fx/sfx
         # bedrock border so nothing escapes the toybox (bottom stays open
@@ -219,14 +222,19 @@ class World:
         below_dens = self._bshift(dens, g, 0)
         sink = below_liq & (dens > below_dens) & (rnd < 0.55)
         n = self._apply_moves(powder & (below_free | sink), g, 0)
-        # diagonal slide (uniform direction per call avoids target conflicts)
+        # diagonal slide (uniform direction per call avoids target conflicts).
+        # SLIDE sets how lively a powder topples; CLUMPY powders (snow,
+        # ash) only topple over steep 2-cell drops, so their piles hold
+        # steep slopes while sand relaxes into wide flat cones.
         d = 1 if parity else -1
         for dd in (d, -d):
             ph = self.v_phase
             powder = ph == M.P_POWDER
             free = ph <= M.P_GAS
-            ok = powder & self._bshift(free, g, dd) & self._bshift(free, 0, dd) \
-                 & (rnd < 0.7)
+            diag = self._bshift(free, g, dd) & self._bshift(free, 0, dd)
+            steep = self._bshift(free, 2 * g, dd)
+            ok = powder & diag & (steep | ~M.CLUMPY[self.v_mat]) \
+                & (rnd < M.SLIDE[self.v_mat])
             n += self._apply_moves(ok, g, dd)
         return n
 
@@ -236,38 +244,117 @@ class World:
         liq = ph == M.P_LIQUID
         if not liq.any():
             return 0
+        # stickiness: gels touching a static cell cling to it — they coat
+        # walls and dribble down them slowly instead of running off.
+        # Statics never move inside this pass, so one mask serves all of it.
+        stickv = M.STICKY[self.v_mat]
+        if stickv.any():
+            stat = ph == M.P_STATIC
+            near_wall = (self._bshift(stat, 0, 1) | self._bshift(stat, 0, -1) |
+                         self._bshift(stat, g, 0) | self._bshift(stat, -g, 0))
+            cling = near_wall & (rnd < stickv)
+            dribble = near_wall & (rnd < stickv * 0.55)
+        else:
+            cling = dribble = np.zeros_like(liq)
         free = ph <= M.P_GAS
         below_free = self._bshift(free, g, 0)
         below_liq = self._bshift(ph, g, 0) == M.P_LIQUID
         below_dens = self._bshift(dens, g, 0)
         sink = below_liq & (dens > below_dens) & (rnd < 0.4)
-        n = self._apply_moves(liq & (below_free | sink), g, 0)
+        fall = liq & below_free & ~dribble
+        n = self._apply_moves(fall, g, 0)
+        real_work = fall                # gravity-driven moves, for levelling
+        # density layering swaps are NOT "real work" for the levelling
+        # window below — oil shuffling on the ocean would hold it open
+        # forever while creep re-mixes what sinking un-mixes
+        n_sink = self._apply_moves(liq & sink & ~below_free & ~dribble, g, 0)
         d = 1 if parity else -1
         for dd in (d, -d):
             ph = self.v_phase
             liq = ph == M.P_LIQUID
             free = ph <= M.P_GAS
-            ok = liq & self._bshift(free, g, dd)
+            ok = liq & self._bshift(free, g, dd) & ~cling & \
+                (rnd > M.VISCOSITY[self.v_mat] * 0.5)
+            real_work |= ok
             n += self._apply_moves(ok, g, dd)
         # lateral flow. Pouring over an edge is real flow (always allowed,
         # resets rest); sloshing on flat ground is gated by the rest counter
         # so big pools go to sleep instead of jittering forever.
         visc = M.VISCOSITY[self.v_mat]
+        n_flat = 0
         for dd in (d, -d):
             ph = self.v_phase
             free = ph <= M.P_GAS
-            liq = (ph == M.P_LIQUID) & (self.v_moved == 0)
+            liq = (ph == M.P_LIQUID) & (self.v_moved == 0) & ~cling
             grounded = liq & ~self._bshift(free, g, 0)
             side_free = self._bshift(free, 0, dd) & (rnd > visc) & \
                 ((rnd < 0.5) if dd == d else (rnd >= 0.5))
             pour = self._bshift(free, g, dd)
-            n += self._apply_moves(grounded & side_free & pour, 0, dd)
+            pouring = grounded & side_free & pour
+            if pouring.any():
+                # a pour hands its rest budget to the cells next in line
+                # (uphill and above), so a draining mound keeps flowing
+                # from the edge inward instead of aging out mid-cascade
+                heir = self._bshift(pouring, 0, dd) | self._bshift(pouring, g, 0)
+                self.v_rest[heir] = 0
+            real_work |= pouring
+            n += self._apply_moves(pouring, 0, dd)
             ph = self.v_phase
-            liq = (ph == M.P_LIQUID) & (self.v_moved == 0)
+            liq = (ph == M.P_LIQUID) & (self.v_moved == 0) & ~cling
             grounded = liq & ~self._bshift(ph <= M.P_GAS, g, 0)
             flat = grounded & side_free & ~pour & \
                 (self.v_rest < self.REST_K)
-            n += self._apply_moves(flat, 0, dd, reset_rest=False)
+            n_flat += self._apply_moves(flat, 0, dd, reset_rest=False)
+        # gravity did real work this tick (falls, slumps, pours — but NOT
+        # flat sloshing or density layering): open the levelling window
+        # WHERE it happened. While a spot stays inside the window box,
+        # terrace creep below flattens stepped domes the pour rule can't
+        # see; a far-away brook must not keep the whole ocean creeping,
+        # and once the splash zone calms down nothing re-opens its box.
+        # The box + deadline are plain sim state for lockstep snapshots.
+        if n and real_work.any():
+            ys = np.nonzero(real_work.any(axis=1))[0]
+            xs = np.nonzero(real_work.any(axis=0))[0]
+            b = [int(ys[0]) + self._ry0 - 16, int(ys[-1]) + self._ry0 + 16,
+                 int(xs[0]) + self._rx0 - 16, int(xs[-1]) + self._rx0 + 16]
+            if self.tick < self.level_until and self.level_box:
+                lb = self.level_box
+                b = [min(b[0], lb[0]), max(b[1], lb[1]),
+                     min(b[2], lb[2]), max(b[3], lb[3])]
+            self.level_box = b
+            self.level_until = self.tick + 120
+        n += n_flat + n_sink
+        # surface levelling: a surface cell slides one column downhill.
+        # The always-on rule needs two monotonically descending columns
+        # (so settled ripples can't trigger it); the boxed creep rule
+        # also takes slope-1 terrace edges, eroding domes completely.
+        creep_on = self.tick < self.level_until and self.level_box
+        if creep_on:
+            lb = self.level_box
+            inbox = np.zeros_like(liq)
+            y0 = max(0, lb[0] - self._ry0); y1 = max(0, lb[1] - self._ry0)
+            x0 = max(0, lb[2] - self._rx0); x1 = max(0, lb[3] - self._rx0)
+            inbox[y0:y1, x0:x1] = True
+        for dd in (d, -d):
+            ph = self.v_phase
+            free = ph <= M.P_GAS
+            surf = (ph == M.P_LIQUID) & (self.v_moved == 0) & ~cling & \
+                (self._bshift(ph, g, 0) == M.P_LIQUID) & \
+                self._bshift(free, -g, 0) & \
+                self._bshift(free, 0, dd) & \
+                (self._bshift(ph, g, dd) == M.P_LIQUID) & \
+                (rnd > visc) & ((rnd < 0.5) if dd == d else (rnd >= 0.5))
+            slide = surf & self._bshift(free, g, 2 * dd)
+            n += self._apply_moves(slide, 0, dd)
+            if creep_on:
+                # the second open column means the target is a real lower
+                # shelf, not a one-cell hollow — creeping into a hollow
+                # would just teleport the hollow uphill and the resulting
+                # endless ripple shuffle keeps whole oceans awake
+                creep = surf & inbox & ~slide & \
+                    ~self._bshift(free, 0, -dd) & \
+                    self._bshift(free, 0, 2 * dd)
+                n += self._apply_moves(creep, 0, dd, reset_rest=False)
         return n
 
     def _gas_pass(self, parity):
@@ -627,13 +714,18 @@ class World:
             fluid = (ph == M.P_LIQUID) | (ph == M.P_GAS)
             inc = fluid & (self.v_rest < 255)
             self.v_rest[inc] += 1
-            # reactions only happen where something is awake
-            self._fire_pass()
-            if self.tick % 2 == 0:
-                self._acid_pass()
+            # reactions only happen where something is awake. During the
+            # mapgen pre-settle the destructive chemistry pauses — fire,
+            # acid and heat — so lava doesn't burn down the scenery before
+            # the players arrive. Gases still age out and water still
+            # quenches lava, or the settle would never go quiet.
+            if not self.settle_mode:
+                self._fire_pass()
+                if self.tick % 2 == 0:
+                    self._acid_pass()
+                if self.tick % 2 == 1:
+                    self._temp_pass()
             self._water_lava_pass()
-            if self.tick % 2 == 1:
-                self._temp_pass()
             self._gas_life_pass()
         self._run_detonations()
         self.activity = moves

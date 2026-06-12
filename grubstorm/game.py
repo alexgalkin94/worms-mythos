@@ -690,6 +690,8 @@ class Game:
             "wind": self.wind, "sudden_death": self.sudden_death,
             "grav_flip_t": self.grav_flip_t, "gravity_dir": self.world.gravity_dir,
             "water_level": self.world.water_level,
+            "level_until": self.world.level_until,
+            "level_box": self.world.level_box,
             "world": base64.b64encode(self.world.to_bytes()).decode(),
             "world_tick": self.world.tick,
             # the active-region box shapes the size of per-step RNG draws,
@@ -740,6 +742,9 @@ class Game:
         self.world.gravity_dir = snap["gravity_dir"]
         self.world.wind = self.wind
         self.world.water_level = snap["water_level"]
+        self.world.level_until = snap.get("level_until", 0)
+        lb = snap.get("level_box")
+        self.world.level_box = list(lb) if lb else None
         self.world.from_bytes(base64.b64decode(snap["world"]))
         self.world.tick = snap["world_tick"]
         self.world._wake_box = list(snap["wake_box"]) \

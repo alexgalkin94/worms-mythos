@@ -123,6 +123,20 @@ VISCOSITY = np.zeros(N_MATS, np.float32)
 VISCOSITY[[WATER, OIL, ACID, LAVA, SLUDGE, SLIME, MAGIC, NITRO, NAPALM]] = \
     [0.00, 0.25, 0.10, 0.88, 0.55, 0.92, 0.15, 0.10, 0.85]
 
+# powder character. SLIDE is the chance per tick to topple down a
+# diagonal (how lively it flows); CLUMPY powders only topple over steep
+# edges (a 2-cell drop), so they hold slope-1 staircases forever — snow
+# drifts and ash heaps stand steep while dry sand relaxes into flat cones.
+SLIDE = np.zeros(N_MATS, np.float32)
+SLIDE[[SAND, GRAVEL, SNOW, ASH, EXPOWDER]] = [0.75, 0.50, 0.35, 0.30, 0.65]
+CLUMPY = np.zeros(N_MATS, bool)
+CLUMPY[[SNOW, ASH]] = True
+
+# stickiness: chance to cling instead of flowing while touching a static
+# cell. Sticky gels coat walls and ceilings instead of running off them.
+STICKY = np.zeros(N_MATS, np.float32)
+STICKY[[SLIME, NAPALM, SLUDGE]] = [0.78, 0.88, 0.30]
+
 # light emission (r, g, b) 0..255, additive, blurred by the renderer
 EMISSION = np.zeros((N_MATS, 3), np.uint8)
 EMISSION[LAVA] = (255, 110, 20)
