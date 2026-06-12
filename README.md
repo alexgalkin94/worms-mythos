@@ -206,8 +206,25 @@ grubstorm/
   ui.py/app.py  menus, screens, the cabinet
   sandbox.py    the lab
   relay.py      room-code relay server (stdlib only, `grubstorm-server`)
+tests/          headless verification suite (stdlib-only, no pytest)
+bench/          sim-tick and end-to-end frame benchmarks
 ```
 
 Determinism contract: anything that affects game state must draw randomness
 from `game.rng` / `world.rng` and never from wall-clock time. Render and
 audio may do whatever they like.
+
+## Tests & benchmarks
+
+```sh
+python tests/run_all.py              # the whole verification suite
+python bench/bench_sim.py [--quick]  # per-tick sim cost by scenario
+python bench/bench_frame.py [--quick]# real App frame pipeline at 144 Hz
+```
+
+Everything runs headless (dummy SDL drivers, forced automatically) and
+needs no pytest. The suite covers lockstep determinism (raw World and full
+bot matches), snapshot round-trips (`World.to_bytes` and the
+`Game.serialize` reconnect path), mapgen for every biome, golden-free
+render determinism, and the fluid-sim behavioural guarantees (vessel
+equalization, surface levelling, sleeping worlds). See `tests/README.md`.
