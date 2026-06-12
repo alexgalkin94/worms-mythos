@@ -17,6 +17,9 @@ _KEY = (255, 0, 255)
 PAL_FLAT = M.PALETTE.reshape(M.N_MATS * 4, 3).copy()
 EMIT_FLAT = M.EMISSION.copy()
 
+_BURN_RGB = np.array([(255, 140, 40), (255, 100, 30),
+                      (240, 180, 60)], np.uint8)
+
 
 class Camera:
     def __init__(self):
@@ -85,6 +88,7 @@ class Renderer:
         self._gas_rect = None
         self._gas_layer = None
         self._zoom_tmp = None
+        self._pal32 = None    # packed palettes, built on first refresh
 
     # ----------------------------------------------------------------- sky
     def _sky(self, spec):
@@ -168,35 +172,57 @@ class Renderer:
         x0 = max(0, box[2] - 1); x1 = min(world.w, box[3] + 1)
         if y0 >= y1 or x0 >= x1:
             return False
+        if self._pal32 is None:
+            self._build_pal32()
         mat = world.mat[y0:y1, x0:x1]
         idxT = np.ascontiguousarray(
             ((mat.astype(np.uint16) << 2) | world.shade[y0:y1, x0:x1]).T)
-        rgbT = PAL_FLAT[idxT]                            # (w, h, 3)
+        # compose in surface-mapped uint32: one machine word per pixel
+        # instead of three bytes — every gather/select below runs ~3-4x
+        # faster than the (w, h, 3) uint8 equivalent, and the result is
+        # written straight through pixels2d with no blit_array conversion
+        rgb32 = np.take(self._pal32, idxT)
         # burning cells flicker orange
         burning = world.burn[y0:y1, x0:x1].T > 0
         if burning.any():
             n = int(burning.sum())
             fl = (np.arange(n) + self._t) % 3
-            rgbT[burning] = np.array([(255, 140, 40), (255, 100, 30),
-                                      (240, 180, 60)], np.uint8)[fl]
+            rgb32[burning] = self._burn32[fl]
         matT = (idxT >> 2).astype(np.uint8)
         phT = M.PHASE[matT]
-        self._edge_shade(world, rgbT, y0, y1, x0, x1)
-        gasT = (phT == M.P_GAS)[..., None]
-        liqT = (phT == M.P_LIQUID)[..., None]
-        key = np.array(_KEY, np.uint8)
-        gas_rgb = np.where(gasT, rgbT, key)   # single pass beats copy+mask
-        liq_rgb = np.where(liqT, rgbT, key)
-        rgbT[phT <= M.P_LIQUID] = _KEY        # key out empty + gas + liquid
-        rect = (x0, y0, x1 - x0, y1 - y0)
-        pygame.surfarray.blit_array(self.cell_surf.subsurface(rect), rgbT)
-        pygame.surfarray.blit_array(self.gas_surf.subsurface(rect), gas_rgb)
-        pygame.surfarray.blit_array(self.liq_surf.subsurface(rect), liq_rgb)
-        pygame.surfarray.blit_array(self.em_surf.subsurface(rect),
-                                    EMIT_FLAT[matT])
+        self._edge_shade(world, rgb32, y0, y1, x0, x1)
+        gasT = phT == M.P_GAS
+        liqT = phT == M.P_LIQUID
+        key32 = self._key32
+        gas32 = np.full_like(rgb32, key32)
+        np.copyto(gas32, rgb32, where=gasT)
+        liq32 = np.full_like(rgb32, key32)
+        np.copyto(liq32, rgb32, where=liqT)
+        rgb32[phT <= M.P_LIQUID] = key32      # key out empty + gas + liquid
+        sx, sy = slice(x0, x1), slice(y0, y1)
+        pygame.surfarray.pixels2d(self.cell_surf)[sx, sy] = rgb32
+        pygame.surfarray.pixels2d(self.gas_surf)[sx, sy] = gas32
+        pygame.surfarray.pixels2d(self.liq_surf)[sx, sy] = liq32
+        pygame.surfarray.pixels2d(self.em_surf)[sx, sy] = \
+            np.take(self._em32, matT)
         return True
 
-    def _edge_shade(self, world, rgbT, y0, y1, x0, x1):
+    def _build_pal32(self):
+        """Pack palette/emission/key colors into the cell surface's pixel
+        format. All four layer surfaces share one format (created equal)."""
+        sr, sg, sb, _ = self.cell_surf.get_shifts()
+
+        def pack(rgb):
+            rgb = rgb.astype(np.uint32)
+            return ((rgb[..., 0] << sr) | (rgb[..., 1] << sg)
+                    | (rgb[..., 2] << sb))
+        self._pal32 = pack(PAL_FLAT)
+        self._em32 = pack(EMIT_FLAT)
+        self._burn32 = pack(_BURN_RGB)
+        self._key32 = np.uint32(self.cell_surf.map_rgb(_KEY))
+        self._shifts32 = (sr, sg, sb)
+
+    def _edge_shade(self, world, rgb32, y0, y1, x0, x1):
         """Noita-style material edges: dark outline where terrain meets air,
         a lit highlight on top surfaces, and a bright skin on liquids."""
         h, w = world.h, world.w
@@ -220,15 +246,23 @@ class Renderer:
         # crop the context window back to the write rect, transposed
         oy, ox = y0 - ey0, x0 - ex0
         sl = (slice(oy, oy + (y1 - y0)), slice(ox, ox + (x1 - x0)))
-        top_litT = top_lit[sl].T
-        outlineT = outline[sl].T
-        skinT = skin[sl].T
-        v = rgbT[top_litT].astype(np.uint16)
-        rgbT[top_litT] = np.minimum(v + (v >> 2) + 16, 255).astype(np.uint8)
-        v = rgbT[outlineT].astype(np.uint16)
-        rgbT[outlineT] = ((v * 130) >> 8).astype(np.uint8)
-        v = rgbT[skinT].astype(np.uint16)
-        rgbT[skinT] = np.minimum(v + (v >> 2) + 10, 255).astype(np.uint8)
+        sr, sg, sb = self._shifts32
+        # gather only the (sparse) masked pixels as packed words, do the
+        # exact per-channel math on the short 1-D vectors, scatter back
+        for maskT, mul, add in ((top_lit[sl].T, None, 16),
+                                (outline[sl].T, 130, 0),
+                                (skin[sl].T, None, 10)):
+            v32 = rgb32[maskT]
+            out = np.zeros_like(v32)
+            for sh in (sr, sg, sb):
+                v = ((v32 >> np.uint32(sh)) & np.uint32(0xFF)) \
+                    .astype(np.uint16)
+                if mul is None:                  # v*1.25 + add, saturated
+                    c = np.minimum(v + (v >> 2) + add, 255)
+                else:                            # (v*mul) >> 8
+                    c = (v * mul) >> 8
+                out |= c.astype(np.uint32) << np.uint32(sh)
+            rgb32[maskT] = out
 
     def _rebuild_light(self, world, spec, projectiles=()):
         """Blurred glow from the emission surface + cave darkness."""
