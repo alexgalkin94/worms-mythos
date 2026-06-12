@@ -234,8 +234,13 @@ class CRT:
             arr[:] = arr[self._warp_x, self._warp_y]
             del arr
 
-        # THE pixel-melt, crossfaded by its own slider
-        big = self.big
+        # THE pixel-melt, crossfaded by its own slider. When the window is
+        # exactly big-sized (the default), compose straight into it — the
+        # first scale below overwrites every pixel, so no clear is needed
+        # and the final full-screen copy disappears.
+        sw, sh = screen.get_size()
+        direct = (sw, sh) == (self.vw, self.vh)
+        big = screen if direct else self.big
         smear = float(s.get("crt_smear", 0.8))
         if smear >= 0.999:
             pygame.transform.smoothscale(view, (self.vw, GRID_H), self._wide)
@@ -268,8 +273,5 @@ class CRT:
             depth = int(9 * flick)
             d = 255 - depth + random.randint(0, depth)
             big.fill((d, d, d), special_flags=pygame.BLEND_RGB_MULT)
-        sw, sh = screen.get_size()
-        if (sw, sh) != (self.vw, self.vh):
+        if not direct:
             pygame.transform.scale(big, (sw, sh), screen)
-        else:
-            screen.blit(big, (0, 0))

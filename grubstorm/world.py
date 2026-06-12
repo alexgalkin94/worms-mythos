@@ -280,8 +280,8 @@ class World:
             free = ph <= M.P_GAS
             diag = self._bshift(free, g, dd) & self._bshift(free, 0, dd)
             steep = self._bshift(free, 2 * g, dd)
-            ok = powder & diag & (steep | ~M.CLUMPY[self.v_mat]) \
-                & (rnd < M.SLIDE[self.v_mat])
+            ok = powder & diag & (steep | ~np.take(M.CLUMPY, self.v_mat)) \
+                & (rnd < np.take(M.SLIDE, self.v_mat))
             n += self._apply_moves(ok, g, dd)
         return n
 
@@ -309,11 +309,11 @@ class World:
         liq = ph == M.P_LIQUID
         if not liq.any():
             return 0
-        visc = M.VISCOSITY[self.v_mat]
+        visc = np.take(M.VISCOSITY, self.v_mat)
         # stickiness: gels touching a static cell cling to it — they coat
         # walls and dribble down them slowly instead of running off.
         # Statics never move inside this pass, so one mask serves all of it.
-        stickv = M.STICKY[self.v_mat]
+        stickv = np.take(M.STICKY, self.v_mat)
         if stickv.any():
             stat = ph == M.P_STATIC
             near_wall = (self._bshift(stat, 0, 1) | self._bshift(stat, 0, -1) |
@@ -418,12 +418,12 @@ class World:
                               0, self.h - 1)
                 sx2 = np.clip((hde & np.uint32(511)).astype(np.intp),
                               0, self.w - 1)
-                liq_g = M.PHASE[self.mat] == M.P_LIQUID
+                liq_g = np.take(M.PHASE, self.mat) == M.P_LIQUID
                 airup = np.vstack([np.ones((1, self.w), bool),
                                    M.PHASE[self.mat[:-1]] <= M.P_GAS])
                 surf_g = liq_g & airup
                 hde[~(surf_g[sy2, sx2] & valid)] = BIG
-            phe = M.PHASE[self.mat[ey0:ey1, ex0:ex1]]
+            phe = np.take(M.PHASE, self.mat[ey0:ey1, ex0:ex1])
             lqe = phe == M.P_LIQUID
             fre = phe <= M.P_GAS
             sfe = lqe & shift(fre, -1, 0, ey0 == 0)
@@ -671,7 +671,7 @@ class World:
                     self._bshift(hot, 0, 1) | self._bshift(hot, 0, -1))
         # heat agitates settled fluids so fuel keeps flowing toward flames
         self.v_rest[near_hot | hot] = 0
-        cand = near_hot & (M.FLAMMABLE[mat] > 0) & (burn == 0)
+        cand = near_hot & (np.take(M.FLAMMABLE, mat) > 0) & (burn == 0)
         ignite = np.zeros_like(cand)
         cys, cxs = nz2(cand)
         if len(cys):
@@ -693,7 +693,7 @@ class World:
             gasify = ignite & (mat == M.GAS)
             mat[gasify] = M.FIRE
             life[gasify] = rng.integers(20, 50)
-            rest = ignite & (M.BURN_FUEL[mat] > 0)
+            rest = ignite & (np.take(M.BURN_FUEL, mat) > 0)
             burn[rest] = 1
             life[rest] = M.BURN_FUEL[mat[rest]]
 
@@ -713,7 +713,7 @@ class World:
                 life[ys + up, xs] = rng.integers(25, 70, len(ys)).astype(np.uint8)
             life[burning] = np.maximum(life[burning].astype(np.int16) - 1, 0).astype(np.uint8)
             # liquids burn away faster
-            ys, xs = nz2(burning & (M.PHASE[mat] == M.P_LIQUID))
+            ys, xs = nz2(burning & (np.take(M.PHASE, mat) == M.P_LIQUID))
             if len(ys):
                 keep = rng.random(len(ys)) < 0.03
                 ys, xs = ys[keep], xs[keep]
@@ -752,8 +752,8 @@ class World:
             if not acid.any():
                 break
             nb = shift(mat, dy, dx, M.BEDROCK)
-            eat = acid & (M.CORRODIBLE[nb] > 0) & \
-                (roll < M.CORRODIBLE[nb] * 0.5)
+            eat = acid & (np.take(M.CORRODIBLE, nb) > 0) & \
+                (roll < np.take(M.CORRODIBLE, nb) * 0.5)
             ys, xs = nz2(eat)
             if len(ys) == 0:
                 continue
@@ -990,8 +990,8 @@ class World:
             sy, sx = slice(y0, y1), slice(x0, x1)
             # refresh the phase/density mirrors inside the region only;
             # outside it nothing moves, so stale values are never read.
-            self.phase[sy, sx] = M.PHASE[self.mat[sy, sx]]
-            self.dens[sy, sx] = M.DENSITY[self.mat[sy, sx]]
+            self.phase[sy, sx] = np.take(M.PHASE, self.mat[sy, sx])
+            self.dens[sy, sx] = np.take(M.DENSITY, self.mat[sy, sx])
             self.v_mat = self.mat[sy, sx]
             self.v_shade = self.shade[sy, sx]
             self.v_life = self.life[sy, sx]
