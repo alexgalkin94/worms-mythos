@@ -416,7 +416,7 @@ class World:
             # reset after EVERY direction is load-bearing — without it the
             # head value leaks one cell per sweep through solid walls and
             # water starts pressurizing across thin rock
-            if self.tick % 2 == 0:
+            if True:
                 for _ in range(8):
                     np.minimum(hde[1:], hde[:-1], out=hde[1:])
                     hde[blocked] = BIG
@@ -455,7 +455,7 @@ class World:
             liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
             cand = liq2 & surfm & ~cling & \
                 (hd != np.uint32(0xFFFFFFFF)) & (rnd > visc)
-            if cand.any() and self.tick % 2 == 0:
+            if cand.any():
                 cy, cx = np.nonzero(cand)
                 cid = hd[cy, cx]
                 order = np.lexsort((cx, cy, cid))
@@ -466,7 +466,7 @@ class World:
                 for s, e in zip(starts, ends):
                     k = 0
                     lo, hi = s, e - 1
-                    while lo < hi and k < 6:
+                    while lo < hi and k < 16:
                         if cy[hi] - cy[lo] < 2:
                             break
                         src_y.append(cy[lo]); src_x.append(cx[lo])
