@@ -353,9 +353,14 @@ class World:
         # density layering between different liquids (oil floats on water)
         below_liq = self._bshift(ph, g, 0) == M.P_LIQUID
         below_dens = self._bshift(dens, g, 0)
+        # density layering also spends the rest budget: mixed pockets
+        # stratify once and go quiet; an explosion stirring them re-arms
+        # the clock and they re-stratify. Without the gate one sealed
+        # water+oil cave churns its swap/flow cycle forever.
         sink = liq & (self.v_moved == 0) & below_liq & \
-            (dens > below_dens) & (rnd < 0.4)
-        n = self._apply_moves(sink, g, 0)
+            (dens > below_dens) & (rnd < 0.4) & \
+            (self.v_rest < self.REST_K)
+        n = self._apply_moves(sink, g, 0, reset_rest=False)
         # discrete bulk transport: falling, diagonal slumping and pouring
         # over edges move whole cells (their mass rides along in the swap).
         # This is what makes splashes lively and towers collapse fast —
@@ -397,6 +402,14 @@ class World:
     def _mass_flow(self, art, g):
         mat, ph = self.v_mat, self.v_phase
         mine = mat == art
+        # the map ocean is decorative with a fixed level (sudden death
+        # raises it discretely) — exempting it from the mass automaton
+        # keeps a 480-wide always-on water body from dominating every
+        # tick. Discrete splash rules still run there.
+        if self.water_level < self.h:
+            oy = self.water_level - self._ry0
+            if oy < mine.shape[0]:
+                mine[max(0, oy):] = False
         # air-borne residue mass joins whichever liquid works the area
         carry = mine | (ph == M.P_EMPTY)
         m = np.where(carry, np.maximum(self.v_lmass, np.float32(0.0)),
@@ -434,10 +447,20 @@ class World:
         mr = shift(m, 0, 1, 0.0)
         sr = np.clip((m - mr) * np.float32(0.25), 0.0, m) * ratem
         sr[~(spread_ok & self._bshift(open_, 0, 1))] = 0.0
-        # UP: only compressed mass rises — this is the pressure release
+        # UP: only compressed mass rises — this is the pressure release.
+        # Under-relaxed by half: a cell squeezed between two stacked
+        # partners gets contradictory dn/up targets under Jacobi updates
+        # and would flip-flop above the flow cutoff forever; halving the
+        # correction makes the oscillation decay below it within ticks.
         ma = shift(m, -g, 0, 0.0)
-        up = np.clip(m - self._stable_bottom(m + ma), 0.0, m) * ratem
-        up[~(mine & self._bshift(open_, -g, 0))] = 0.0
+        up = np.clip(m - self._stable_bottom(m + ma), 0.0, m) * ratem \
+            * np.float32(0.5)
+        # up also spends the rest budget: during real drainage the
+        # accompanying falls keep re-arming it, while a sealed pocket's
+        # up/dn micro-cycle (lift a crumb, drip it back, forever) runs
+        # out of clock and the pocket finally sleeps
+        up[~(mine & self._bshift(open_, -g, 0) &
+             (self.v_rest < self.REST_K * 4))] = 0.0
         # NOTE: residue in air may fall and spread but never pushes UP —
         # only real, visible water carries pressure
         # conservation: never ship more than the cell holds
@@ -451,13 +474,16 @@ class World:
         moved = (dn > 0) | (sl > 0) | (sr > 0) | (up > 0)
         if not moved.any():
             return 0
-        # vertical mass work is real gravity/pressure activity: refresh
-        # the rest clock there (and at the receiving cells)
-        vert = (dn > 0.01) | (up > 0.01)
+        # DOWNWARD mass work is real gravity activity: refresh the rest
+        # clock there (and at the receiving cells). UP does NOT re-arm:
+        # a sealed pocket teleporting its air bubble via appear/vanish
+        # cycles up-flows forever, and counting those as work kept whole
+        # maps awake. Pressure equalization is sustained by the falls and
+        # pours that accompany any REAL drainage instead.
+        vert = dn > 0.01
         if vert.any():
             self.v_rest[vert] = 0
             self.v_rest[shift(dn, -g, 0, 0.0) > 0.01] = 0
-            self.v_rest[shift(up, g, 0, 0.0) > 0.01] = 0
         new_m = m - (dn + sl + sr + up)
         new_m += shift(dn, -g, 0, 0.0)
         new_m += shift(sl, 0, 1, 0.0)

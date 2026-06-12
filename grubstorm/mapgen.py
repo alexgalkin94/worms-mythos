@@ -192,15 +192,36 @@ def generate(biome: str, seed: int, w: int = GRID_W, h: int = GRID_H) -> MapSpec
     # floods find their level, loose grains land, gas pockets rise. The
     # match then opens on a quiet world instead of a mass earthquake (the
     # settle is by far the most expensive phase the sim ever sees).
-    # analytic hydrostatic mass init: every liquid column starts at its
-    # exact equilibrium (1 + depth*LCOMP per cell), so the mass automaton
-    # has zero settle work to do on oceans and ponds
+    # analytic hydrostatic mass init: every liquid cell starts at its
+    # exact equilibrium 1 + pressure_depth*LCOMP, where pressure depth is
+    # measured from the highest CONNECTED surface (min-propagated through
+    # the liquid) — a column-local guess is wrong under rock overhangs
+    # and the mass automaton would grind for seconds correcting it.
     liq = M.PHASE[world.mat] == M.P_LIQUID
     idx = np.arange(world.h, dtype=np.int32)[:, None]
-    last_air = np.maximum.accumulate(np.where(~liq, idx, -1), axis=0)
-    depth = np.where(liq, idx - last_air, 0).astype(np.float32)
-    world.lmass[:] = np.where(liq, 1.0 + (depth - 1) * float(World.LCOMP),
-                              0.0)
+    BIG = np.int32(1 << 20)
+    world.lmass[:] = 0.0
+    for art in np.unique(world.mat[liq]):
+        mine = world.mat == art
+        # the mass automaton computes pressure PER SPECIES, so the init
+        # must too: depth counts from this liquid's own connected top
+        # (oil on water: the water column restarts at 1.0 under the oil)
+        surf = mine & ~np.vstack([np.zeros((1, world.w), bool), mine[:-1]])
+        head = np.where(surf, idx, BIG)
+        head[~mine] = BIG
+        blocked = ~mine
+        for _ in range(48):             # in-place sweeps: rows/cols at once
+            np.minimum(head[1:], head[:-1], out=head[1:])
+            head[blocked] = BIG
+            np.minimum(head[:-1], head[1:], out=head[:-1])
+            head[blocked] = BIG
+            np.minimum(head[:, 1:], head[:, :-1], out=head[:, 1:])
+            head[blocked] = BIG
+            np.minimum(head[:, :-1], head[:, 1:], out=head[:, :-1])
+            head[blocked] = BIG
+        depth = np.where(mine & (head < BIG), idx - head, 0)
+        world.lmass[mine] = (1.0 + np.maximum(depth, 0)
+                             * float(World.LCOMP)).astype(np.float32)[mine]
     world._wake_box = [0, h, 0, w]
     world.settle_mode = True
     for _ in range(900):
