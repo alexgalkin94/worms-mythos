@@ -1204,11 +1204,35 @@ class App:
                 if pygame.display.get_surface() is not None:
                     pygame.display.quit()
                     pygame.display.init()
+                # vsync OFF through every channel we have (the fps_cap
+                # setting is the pacing authority, not the display):
+                #  1. vsync=False below keeps SDL_RENDERER_PRESENTVSYNC out
+                #     of the creation flags;
+                #  2. the SDL_RENDER_VSYNC hint OVERRIDES those flags inside
+                #     SDL_CreateRenderer, and SDL hints read the environment
+                #     — pin it to 0 so a system-wide hint can't re-enable
+                #     sync behind our back;
+                #  3. Mesa (vblank_mode) and the NVIDIA GL driver
+                #     (__GL_SYNC_TO_VBLANK) honor their own env switches at
+                #     GL context creation, both able to force-sync an
+                #     SDL-async swapchain.
+                # setdefault everywhere: an explicit user override wins.
+                # pygame-ce 2.5.7 exposes no SDL_RenderSetVSync wrapper and
+                # no query; the renderer's true behavior is visible in
+                # crt.present_block_ms (~16.7 ms = something still syncs,
+                # e.g. a Wayland compositor — nothing more we can do here).
+                os.environ.setdefault("SDL_RENDER_VSYNC", "0")
+                os.environ.setdefault("vblank_mode", "0")
+                os.environ.setdefault("__GL_SYNC_TO_VBLANK", "0")
                 win = Window("GRUBSTORM — every pixel is alive", size=size,
                              resizable=True,
                              fullscreen_desktop=bool(
                                  self.settings.get("fullscreen")))
-                ren = Renderer(win, accelerated=1, vsync=False)
+                # target_texture=True: the CRT chain renders into target
+                # textures; make driver selection guarantee support instead
+                # of finding out at the first ren.target assignment
+                ren = Renderer(win, accelerated=1, vsync=False,
+                               target_texture=True)
                 self.gpu_win = win
                 # placeholder so size-derived code keeps working
                 self.screen_surf = pygame.Surface(size)

@@ -87,6 +87,11 @@ class CRT:
         self._ren = None               # GPU chain (attach_gpu), else CPU
         self._win = None
         self._gpu_built_for = None
+        # rolling cost of Renderer.present() in ms (GPU mode). ~0 when the
+        # swap is free-running; pinned near 16.7 when something downstream
+        # (driver setting, compositor) still forces vsync despite our
+        # requests — THE number to check when GPU mode caps at 60 fps.
+        self.present_block_ms = 0.0
         self._build_overlays()
 
     # ----------------------------------------------------------------- GPU
@@ -94,25 +99,58 @@ class CRT:
         """Run the big-surface chain on the GPU: upscales and the MUL/ADD
         overlay blends become texture draws. The per-pixel stages that need
         numpy (persist, fringe, bloom threshold, warp) stay on the CPU at
-        view resolution, where they are cheap."""
+        view resolution, where they are cheap.
+
+        Streaming uploads (the view, the halation bright-pass) rotate
+        through a small ring of textures: Texture.update on a texture the
+        GPU may still be sampling from the previous frame can make the
+        driver synchronize the whole pipeline, which shows up as mystery
+        present-side stalls under load. Ring depth is 3 (override with the
+        `gpu_upload_ring` setting, 1..4; 1 = old single-texture behavior).
+
+        The linear half of the smear crossfade is no longer uploaded at
+        all: a 1:1 draw is filter-independent, so the nearest-filtered view
+        texture is GPU-copied into a linear-filtered target texture and
+        sampled from there. One upload serves both draws — this halves the
+        upload bandwidth AND the per-upload format-conversion cost (the
+        XRGB view surface is converted to the texture's ARGB layout inside
+        Texture.update on every call)."""
         from pygame._sdl2.video import Texture
         self._ren, self._win = renderer, window
-        self._tx_near = Texture(renderer, (GRID_W, GRID_H),
-                                streaming=True, scale_quality=0)
+        try:
+            ring = int(self.settings.get("gpu_upload_ring", 3))
+        except (TypeError, ValueError):
+            ring = 3
+        ring = max(1, min(4, ring))
+        self._ring_i = self._ring_b = 0
+        self._tx_near = [Texture(renderer, (GRID_W, GRID_H),
+                                 streaming=True, scale_quality=0)
+                         for _ in range(ring)]
+        # GPU-side clone of the view for linear sampling (never uploaded;
+        # a render target only, so no update-stall concern and no ring)
         self._tx_lin = Texture(renderer, (GRID_W, GRID_H),
-                               streaming=True, scale_quality=1)
+                               target=True, scale_quality=1)
+        self._tx_lin.blend_mode = pygame.BLENDMODE_BLEND
         self._tx_wide = Texture(renderer, (self.vw, GRID_H),
                                 target=True, scale_quality=0)
-        self._tx_blo = Texture(renderer, (GRID_W // 8, GRID_H // 8),
-                               streaming=True, scale_quality=1)
+        self._tx_blo = [Texture(renderer, (GRID_W // 8, GRID_H // 8),
+                                streaming=True, scale_quality=1)
+                        for _ in range(ring)]
+        for t in self._tx_blo:
+            t.blend_mode = pygame.BLENDMODE_ADD
         white = pygame.Surface((1, 1)); white.fill((255, 255, 255))
         self._tx_white = Texture.from_surface(renderer, white)
+        self._tx_white.blend_mode = pygame.BLENDMODE_MOD
         self._gpu_built_for = None
 
     def _gpu_rebuild(self):
         from pygame._sdl2.video import Texture
+        # blend modes are fixed per role — set once here (textures are
+        # recreated on overlay rebuilds), not per frame in _present_gpu
         self._tx_phos = Texture.from_surface(self._ren, self._phosphor)
+        self._tx_phos.blend_mode = pygame.BLENDMODE_MOD
         self._tx_shine = Texture.from_surface(self._ren, self._shine)
+        self._tx_shine.blend_mode = pygame.BLENDMODE_ADD
         self._gpu_built_for = self._built_for
 
     def _present_gpu(self, view, q, bloom_amt):
@@ -124,37 +162,43 @@ class CRT:
         # stretch, linear stretch alpha-blended on top, then the vertical
         # row replication happens in the final nearest draw to the window
         smear = float(s.get("crt_smear", 0.8))
-        self._tx_near.update(view)
-        ren.target = self._tx_wide
-        self._tx_near.draw(dstrect=(0, 0, self.vw, GRID_H))
+        self._ring_i = (self._ring_i + 1) % len(self._tx_near)
+        tx_near = self._tx_near[self._ring_i]
+        tx_near.update(view)                  # the ONE view upload per frame
         if smear > 0.003:
-            self._tx_lin.update(view)
-            self._tx_lin.blend_mode = pygame.BLENDMODE_BLEND
+            # clone for linear sampling: 1:1, blend NONE — pixel-exact
+            ren.target = self._tx_lin
+            tx_near.draw(dstrect=(0, 0, GRID_W, GRID_H))
             self._tx_lin.alpha = int(255 * min(1.0, smear))
+        ren.target = self._tx_wide
+        tx_near.draw(dstrect=(0, 0, self.vw, GRID_H))
+        if smear > 0.003:
             self._tx_lin.draw(dstrect=(0, 0, self.vw, GRID_H))
         ren.target = None
         ww, wh = self._win.size
         full = (0, 0, ww, wh)
         self._tx_wide.draw(dstrect=full)
-        self._tx_phos.blend_mode = pygame.BLENDMODE_MOD
         self._tx_phos.draw(dstrect=full)
         hal = float(s.get("crt_halation", 0.6))
         if q is not None and hal > 0.03:
-            self._tx_blo.update(q)
-            self._tx_blo.blend_mode = pygame.BLENDMODE_ADD
-            self._tx_blo.alpha = int((50 + 70 * bloom_amt) * hal)
-            self._tx_blo.draw(dstrect=full)
+            self._ring_b = (self._ring_b + 1) % len(self._tx_blo)
+            tx_blo = self._tx_blo[self._ring_b]
+            tx_blo.update(q)
+            tx_blo.alpha = int((50 + 70 * bloom_amt) * hal)
+            tx_blo.draw(dstrect=full)
         if float(s.get("crt_vignette", 0.55)) > 0.05:
-            self._tx_shine.blend_mode = pygame.BLENDMODE_ADD
             self._tx_shine.draw(dstrect=full)
         flick = float(s.get("crt_flicker", 0.3))
         if not s.get("reduce_flash") and flick > 0.03:
             depth = int(9 * flick)
             d = 255 - depth + random.randint(0, depth)
-            self._tx_white.blend_mode = pygame.BLENDMODE_MOD
             self._tx_white.color = (d, d, d)
             self._tx_white.draw(dstrect=full)
+        t0 = time.perf_counter()
         ren.present()
+        # exp-smoothed swap cost: vsync/compositor back-pressure lives here
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        self.present_block_ms += (dt_ms - self.present_block_ms) * 0.1
 
     # ------------------------------------------------------------- overlays
     def _overlay_key(self):
