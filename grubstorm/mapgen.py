@@ -194,7 +194,7 @@ def generate(biome: str, seed: int, w: int = GRID_W, h: int = GRID_H) -> MapSpec
     # settle is by far the most expensive phase the sim ever sees).
     world._wake_box = [0, h, 0, w]
     world.settle_mode = True
-    for _ in range(2400):
+    for _ in range(900):
         world.step()
         if world._wake_box is None:
             break
