@@ -192,19 +192,28 @@ class World:
         ys, xs = np.nonzero(mask[r0:r1])
         ys += r0
         n = len(ys)
-        ty, tx = ys + dy, xs + dx
-        for a in (self.v_mat, self.v_shade, self.v_life, self.v_burn,
-                  self.v_temp, self.v_phase, self.v_dens, self.v_rest):
-            tmp = a[ty, tx].copy()
-            a[ty, tx] = a[ys, xs]
-            a[ys, xs] = tmp
-        self.v_moved[ys, xs] = 1
-        self.v_moved[ty, tx] = 1
+        # swap through FLAT indices into the contiguous base planes: the
+        # source/target index arithmetic happens once instead of inside
+        # every per-plane 2-D fancy index, and 1-D gathers take numpy's
+        # fast path. Same cells, same values — bit-identical.
+        wf = self.mat.shape[1]
+        fs = (ys + self._ry0) * wf + (xs + self._rx0)
+        fd = fs + (dy * wf + dx)
+        for a in (self.mat, self.shade, self.life, self.burn,
+                  self.temp, self.phase, self.dens, self.rest):
+            ar = a.reshape(-1)
+            tmp = ar[fd]                 # fancy gather already copies
+            ar[fd] = ar[fs]
+            ar[fs] = tmp
+        mr = self.moved.reshape(-1)
+        mr[fs] = 1
+        mr[fd] = 1
         if reset_rest:
             # gravity-driven motion is "real" flow and wakes the cell;
             # flat lateral wandering carries its rest along and ages out
-            self.v_rest[ys, xs] = 0
-            self.v_rest[ty, tx] = 0
+            rr = self.rest.reshape(-1)
+            rr[fs] = 0
+            rr[fd] = 0
         oy, ox = self._ry0, self._rx0
         x0 = ox + int(xs.min()) - 1; y0 = oy + int(ys.min()) - 1
         x1 = ox + int(xs.max()) + 1; y1 = oy + int(ys.max()) + 1
@@ -411,7 +420,11 @@ class World:
                    + np.arange(ex0, ex1, dtype=np.uint32)[None, :])
             np.minimum(hde, np.where(sfe, ids, BIG), out=hde)
             blocked = ~lqe
-            hde[blocked] = BIG
+            # barrier plane: OR with all-ones forces BIG on blocked cells,
+            # OR with 0 is identity — one pure vector op instead of a
+            # boolean fancy-assignment (which was ~6x slower per sweep)
+            barrier = np.where(blocked, np.uint32(BIG), np.uint32(0))
+            np.bitwise_or(hde, barrier, out=hde)
             # in-place slice minimums (no shift allocations); the barrier
             # reset after EVERY direction is load-bearing — without it the
             # head value leaks one cell per sweep through solid walls and
@@ -423,13 +436,13 @@ class World:
             if hot or self.tick % 2 == 0:
                 for _ in range(5 if hot else 2):
                     np.minimum(hde[1:], hde[:-1], out=hde[1:])
-                    hde[blocked] = BIG
+                    np.bitwise_or(hde, barrier, out=hde)
                     np.minimum(hde[:-1], hde[1:], out=hde[:-1])
-                    hde[blocked] = BIG
+                    np.bitwise_or(hde, barrier, out=hde)
                     np.minimum(hde[:, 1:], hde[:, :-1], out=hde[:, 1:])
-                    hde[blocked] = BIG
+                    np.bitwise_or(hde, barrier, out=hde)
                     np.minimum(hde[:, :-1], hde[:, 1:], out=hde[:, :-1])
-                    hde[blocked] = BIG
+                    np.bitwise_or(hde, barrier, out=hde)
             # crop the extended window back to the region for the rules
             oy, ox = ry0 - ey0, rx0 - ex0
             hd = hde[oy:oy + (ry1 - ry0), ox:ox + (rx1 - rx0)]
