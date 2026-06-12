@@ -416,8 +416,12 @@ class World:
             # reset after EVERY direction is load-bearing — without it the
             # head value leaks one cell per sweep through solid walls and
             # water starts pressurizing across thin rock
-            if True:
-                for _ in range(8):
+            # full solver power only while equalization work is in
+            # flight (the level window is open) — idle regions just keep
+            # the lines warm at a fraction of the cost
+            hot = self.tick < self.level_until
+            if hot or self.tick % 2 == 0:
+                for _ in range(5 if hot else 2):
                     np.minimum(hde[1:], hde[:-1], out=hde[1:])
                     hde[blocked] = BIG
                     np.minimum(hde[:-1], hde[1:], out=hde[:-1])
@@ -435,14 +439,18 @@ class World:
             # two flow rounds per tick: pipe transport works by bubbles
             # walking backwards through the duct one cell per round, so
             # this directly doubles tunnel throughput
-            for _ in range(2):
+            for _round in range(2):
+                round_n = 0
                 for dd in (d, -d):
                     ph = self.v_phase
                     liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
                     flow = liq2 & deep & ~cling & \
                         self._bshift(ph <= M.P_GAS, 0, dd) & (rnd > visc)
                     real_work |= flow
-                    n += self._apply_moves(flow, 0, dd)
+                    round_n += self._apply_moves(flow, 0, dd)
+                n += round_n
+                if not round_n:          # quiet round: round 2 won't differ
+                    break
             # ---- pressure teleport (the Dwarf Fortress trick) ----------
             # Fluid under pressure doesn't crawl cell by cell: the top
             # cell of a body's HIGH surface jumps straight to the lowest
@@ -989,7 +997,8 @@ class World:
             # the players arrive. Gases still age out and water still
             # quenches lava, or the settle would never go quiet.
             if not self.settle_mode:
-                self._fire_pass()
+                if self.tick % 2 == 1:
+                    self._fire_pass()    # 30 Hz is plenty for flames
                 if self.tick % 2 == 0:
                     self._acid_pass()
                 if self.tick % 2 == 1:
