@@ -182,12 +182,11 @@ class Renderer:
         matT = (idxT >> 2).astype(np.uint8)
         phT = M.PHASE[matT]
         self._edge_shade(world, rgbT, y0, y1, x0, x1)
-        gasT = phT == M.P_GAS
-        liqT = phT == M.P_LIQUID
-        gas_rgb = rgbT.copy()
-        gas_rgb[~gasT] = _KEY
-        liq_rgb = rgbT.copy()
-        liq_rgb[~liqT] = _KEY
+        gasT = (phT == M.P_GAS)[..., None]
+        liqT = (phT == M.P_LIQUID)[..., None]
+        key = np.array(_KEY, np.uint8)
+        gas_rgb = np.where(gasT, rgbT, key)   # single pass beats copy+mask
+        liq_rgb = np.where(liqT, rgbT, key)
         rgbT[phT <= M.P_LIQUID] = _KEY        # key out empty + gas + liquid
         rect = (x0, y0, x1 - x0, y1 - y0)
         pygame.surfarray.blit_array(self.cell_surf.subsurface(rect), rgbT)

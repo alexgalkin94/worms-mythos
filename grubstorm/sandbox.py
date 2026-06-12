@@ -317,7 +317,9 @@ class SandboxScreen:
                     self.mat = m
                     self.tool = "paint"
                     self._flash(f"picked {M.NAMES[m]}", 70)
-        # world interaction (never through the panel)
+        # world interaction (never through the panel). Painting is tied to
+        # sim ticks, not render frames — at 144 fps a frame-rate brush fed
+        # the world 2.4x the material and the lag to match
         if not self._over_panel(ui):
             if self.tool != "paint":
                 if ui.clicked:
@@ -326,11 +328,13 @@ class SandboxScreen:
                         pass                     # keep blasting on click
                     else:
                         self.tool = "paint"
-            elif pygame.mouse.get_pressed()[0]:
+            elif pygame.mouse.get_pressed()[0] and \
+                    (self.app.sim_steps or not self.running):
                 self.world.paint(ui.mx, ui.my, self.brush, self.mat,
                                  mode="replace" if self.mat != M.EMPTY
                                  else "erase")
-            if pygame.mouse.get_pressed()[2]:
+            if pygame.mouse.get_pressed()[2] and \
+                    (self.app.sim_steps or not self.running):
                 self.world.paint(ui.mx, ui.my, self.brush, M.EMPTY,
                                  mode="erase")
         if self.running:

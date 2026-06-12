@@ -179,10 +179,17 @@ class World:
         self.wake(ox + x0, oy + y0, ox + x1 - 1, oy + y1 - 1)
 
     def _apply_moves(self, mask, dy, dx, reset_rest=True, keep_awake=True):
-        ys, xs = np.nonzero(mask)
-        n = len(ys)
-        if n == 0:
+        # clip to the mask's bounding rows first: the full-region nonzero
+        # scan dominated profiles when a big region had one small active
+        # spot (and most rule masks are empty or tiny)
+        rows = mask.any(1)
+        if not rows.any():
             return 0
+        r0 = int(rows.argmax())
+        r1 = len(rows) - int(rows[::-1].argmax())
+        ys, xs = np.nonzero(mask[r0:r1])
+        ys += r0
+        n = len(ys)
         ty, tx = ys + dy, xs + dx
         for a in (self.v_mat, self.v_shade, self.v_life, self.v_burn,
                   self.v_temp, self.v_phase, self.v_dens, self.v_rest):
@@ -226,7 +233,7 @@ class World:
         out[oy, ox] = a[sy, sx]
         return out
 
-    def _powder_pass(self, parity):
+    def _powder_pass(self, parity, lateral=True):
         g = self.gravity_dir
         ph, dens, rnd = self.v_phase, self.v_dens, self.v_rnd
         powder = ph == M.P_POWDER
@@ -238,6 +245,8 @@ class World:
         below_dens = self._bshift(dens, g, 0)
         sink = below_liq & (dens > below_dens) & (rnd < 0.55)
         n = self._apply_moves(powder & (below_free | sink), g, 0)
+        if not lateral:                       # falling runs every substep,
+            return n                          # toppling once per tick
         # diagonal slide (uniform direction per call avoids target conflicts).
         # SLIDE sets how lively a powder topples; CLUMPY powders (snow,
         # ash) only topple over steep 2-cell drops, so their piles hold
@@ -254,12 +263,31 @@ class World:
             n += self._apply_moves(ok, g, dd)
         return n
 
-    def _liquid_pass(self, parity):
+    def _mark_level_work(self, real_work):
+        """Open/extend the levelling window box around real gravity work."""
+        if not real_work.any():
+            return
+        ys = np.nonzero(real_work.any(axis=1))[0]
+        xs = np.nonzero(real_work.any(axis=0))[0]
+        b = [int(ys[0]) + self._ry0 - 16, int(ys[-1]) + self._ry0 + 16,
+             int(xs[0]) + self._rx0 - 16, int(xs[-1]) + self._rx0 + 16]
+        if self.tick < self.level_until and self.level_box:
+            lb = self.level_box
+            b = [min(b[0], lb[0]), max(b[1], lb[1]),
+                 min(b[2], lb[2]), max(b[3], lb[3])]
+        self.level_box = b
+        self.level_until = self.tick + 120
+
+    def _liquid_pass(self, parity, lateral=True):
+        """Vertical work (falling, sinking, slumping) runs every substep;
+        the expensive lateral machinery — hydrostatic flow, pours, flat
+        slosh, surface levelling — only needs one pass per tick."""
         g = self.gravity_dir
         ph, dens, rnd = self.v_phase, self.v_dens, self.v_rnd
         liq = ph == M.P_LIQUID
         if not liq.any():
             return 0
+        visc = M.VISCOSITY[self.v_mat]
         # stickiness: gels touching a static cell cling to it — they coat
         # walls and dribble down them slowly instead of running off.
         # Statics never move inside this pass, so one mask serves all of it.
@@ -285,12 +313,19 @@ class World:
         # forever while creep re-mixes what sinking un-mixes
         n_sink = self._apply_moves(liq & sink & ~below_free & ~dribble, g, 0)
         d = 1 if parity else -1
-        # hydrostatic push: a submerged cell (liquid overhead = pressure)
-        # squeezes sideways into free space. The bubble it leaves behind
-        # collapses next tick, the column drops — real U-tube physics, so
-        # a tank drains through a hole punched below the waterline until
-        # the level meets the hole. At rest no cell has both pressure and
-        # an open side, so settled pools stay asleep.
+        # diagonal slump runs every substep; everything below is lateral
+        for dd in (d, -d):
+            ph = self.v_phase
+            liq = ph == M.P_LIQUID
+            free = ph <= M.P_GAS
+            ok = liq & self._bshift(free, g, dd) & ~cling & \
+                (rnd > visc * 0.5)
+            real_work |= ok
+            n += self._apply_moves(ok, g, dd)
+        if not lateral:
+            if n:
+                self._mark_level_work(real_work)
+            return n + n_sink
         # hydrostatic flow. A cell is pressurized if liquid stands on it;
         # pressure conducts horizontally through each row-wise connected
         # liquid run (vectorized: segment ids via cumsum, one bincount).
@@ -311,27 +346,20 @@ class World:
             fed[seg[pressured]] = True
             fed[0] = False
             run_fed = fed[seg]
+            # no direction split here: pressurized water flows every tick
+            # (d alternates per tick, and the moved flag stops a cell from
+            # being taken twice), or a thin drain hole starves and the
+            # wake box dies mid-drain
             for dd in (d, -d):
                 ph = self.v_phase
                 liq2 = (ph == M.P_LIQUID) & (self.v_moved == 0)
                 flow = liq2 & run_fed & ~cling & \
-                    self._bshift(ph <= M.P_GAS, 0, dd) & \
-                    (rnd > M.VISCOSITY[self.v_mat]) & \
-                    ((rnd < 0.5) if dd == d else (rnd >= 0.5))
+                    self._bshift(ph <= M.P_GAS, 0, dd) & (rnd > visc)
                 real_work |= flow
                 n += self._apply_moves(flow, 0, dd)
-        for dd in (d, -d):
-            ph = self.v_phase
-            liq = ph == M.P_LIQUID
-            free = ph <= M.P_GAS
-            ok = liq & self._bshift(free, g, dd) & ~cling & \
-                (rnd > M.VISCOSITY[self.v_mat] * 0.5)
-            real_work |= ok
-            n += self._apply_moves(ok, g, dd)
         # lateral flow. Pouring over an edge is real flow (always allowed,
         # resets rest); sloshing on flat ground is gated by the rest counter
         # so big pools go to sleep instead of jittering forever.
-        visc = M.VISCOSITY[self.v_mat]
         n_flat = 0
         for dd in (d, -d):
             ph = self.v_phase
@@ -363,17 +391,8 @@ class World:
         # see; a far-away brook must not keep the whole ocean creeping,
         # and once the splash zone calms down nothing re-opens its box.
         # The box + deadline are plain sim state for lockstep snapshots.
-        if n and real_work.any():
-            ys = np.nonzero(real_work.any(axis=1))[0]
-            xs = np.nonzero(real_work.any(axis=0))[0]
-            b = [int(ys[0]) + self._ry0 - 16, int(ys[-1]) + self._ry0 + 16,
-                 int(xs[0]) + self._rx0 - 16, int(xs[-1]) + self._rx0 + 16]
-            if self.tick < self.level_until and self.level_box:
-                lb = self.level_box
-                b = [min(b[0], lb[0]), max(b[1], lb[1]),
-                     min(b[2], lb[2]), max(b[3], lb[3])]
-            self.level_box = b
-            self.level_until = self.tick + 120
+        if n:
+            self._mark_level_work(real_work)
         n += n_flat + n_sink
         # surface levelling: a surface cell slides one column downhill.
         # The always-on rule needs two monotonically descending columns
@@ -457,16 +476,22 @@ class World:
         mat, rng = self.v_mat, self.rng
         life, burn = self.v_life, self.v_burn
         oy, ox = self._ry0, self._rx0
-        # fire consumes itself
+        # fire consumes itself. Random rolls are drawn per CANDIDATE, not
+        # per region cell — a full-region float field x4 dominated this
+        # pass in profiles while the candidate sets stay tiny.
         fire = mat == M.FIRE
         if fire.any():
             self._wake_mask(fire, oy, ox)
             life[fire] = np.maximum(life[fire].astype(np.int16) - 1, 0).astype(np.uint8)
             dead = fire & (life == 0)
-            r = rng.random(mat.shape)
-            mat[dead & (r < 0.25)] = M.SMOKE
-            life[dead & (r < 0.25)] = rng.integers(40, 120)
-            mat[dead & (r >= 0.25)] = M.EMPTY
+            ys, xs = np.nonzero(dead)
+            if len(ys):
+                r = rng.random(len(ys))
+                smoke = r < 0.25
+                mat[ys[smoke], xs[smoke]] = M.SMOKE
+                life[ys[smoke], xs[smoke]] = \
+                    rng.integers(40, 120, int(smoke.sum())).astype(np.uint8)
+                mat[ys[~smoke], xs[~smoke]] = M.EMPTY
 
         # ignition: anything flammable next to heat
         hot = fire | (mat == M.LAVA) | (burn > 0)
@@ -474,9 +499,13 @@ class World:
                     self._bshift(hot, 0, 1) | self._bshift(hot, 0, -1))
         # heat agitates settled fluids so fuel keeps flowing toward flames
         self.v_rest[near_hot | hot] = 0
-        flam = M.FLAMMABLE[mat]
-        roll = rng.random(mat.shape)
-        ignite = near_hot & (flam > 0) & (roll < flam) & (burn == 0)
+        cand = near_hot & (M.FLAMMABLE[mat] > 0) & (burn == 0)
+        ignite = np.zeros_like(cand)
+        cys, cxs = np.nonzero(cand)
+        if len(cys):
+            roll = rng.random(len(cys))
+            lit = roll < M.FLAMMABLE[mat[cys, cxs]]
+            ignite[cys[lit], cxs[lit]] = True
         if ignite.any():
             self._wake_mask(ignite, oy, ox)
             det = ignite & ((mat == M.EXPOWDER) | (mat == M.NITRO))
@@ -502,19 +531,23 @@ class World:
             self._wake_mask(burning, oy, ox)
             up = -self.gravity_dir
             above_empty = self._bshift(mat == M.EMPTY, up, 0)
-            emit = burning & above_empty & (rng.random(mat.shape) < 0.22)
+            emit = burning & above_empty
             emit[0 if up < 0 else -1, :] = False
             ys, xs = np.nonzero(emit)
             if len(ys):
+                keep = rng.random(len(ys)) < 0.22
+                ys, xs = ys[keep], xs[keep]
                 mat[ys + up, xs] = M.FIRE
                 life[ys + up, xs] = rng.integers(25, 70, len(ys)).astype(np.uint8)
             life[burning] = np.maximum(life[burning].astype(np.int16) - 1, 0).astype(np.uint8)
             # liquids burn away faster
-            consumed = burning & (M.PHASE[mat] == M.P_LIQUID) & \
-                       (rng.random(mat.shape) < 0.03)
-            mat[consumed] = M.FIRE
-            life[consumed] = 40
-            burn[consumed] = 0
+            ys, xs = np.nonzero(burning & (M.PHASE[mat] == M.P_LIQUID))
+            if len(ys):
+                keep = rng.random(len(ys)) < 0.03
+                ys, xs = ys[keep], xs[keep]
+                mat[ys, xs] = M.FIRE
+                life[ys, xs] = 40
+                burn[ys, xs] = 0
             done = (burn > 0) & (life == 0)
             res = M.BURN_RESIDUE[mat[done]]
             mat[done] = res
@@ -533,10 +566,15 @@ class World:
         acid = mat == M.ACID
         if not acid.any():
             return
-        roll = rng.random(mat.shape)
         # only freshly disturbed acid corrodes; settled pools turn inert
         # (and therefore cheap) until an explosion or flow stirs them up
         fresh = self.v_rest < self.REST_K
+        if not (acid & fresh).any():
+            return
+        # per-candidate rolls instead of a full-region random field
+        roll = np.ones(mat.shape, np.float32)
+        ays, axs = np.nonzero(acid & fresh)
+        roll[ays, axs] = rng.random(len(ays))
         for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             acid = (mat == M.ACID) & fresh
             if not acid.any():
@@ -595,6 +633,26 @@ class World:
         mat, t = self.v_mat, self.v_temp
         burn, life = self.v_burn, self.v_life
         oy, ox = self._ry0, self._rx0
+        # thermal bounding box: the f32 diffusion only needs to run where
+        # heat sources sit or temperature actually deviates from ambient —
+        # a water region without fire skips the whole pass
+        src = (mat == M.LAVA) | (mat == M.FIRE) | (burn > 0) | \
+              (mat == M.ICE) | (mat == M.SNOW)
+        hot = src | (np.abs(t - self.ambient) > 0.6)
+        rows = hot.any(1)
+        if not rows.any():
+            return
+        cols = hot.any(0)
+        r0 = max(0, int(rows.argmax()) - 2)
+        r1 = min(hot.shape[0], len(rows) - int(rows[::-1].argmax()) + 2)
+        c0 = max(0, int(cols.argmax()) - 2)
+        c1 = min(hot.shape[1], len(cols) - int(cols[::-1].argmax()) + 2)
+        mat = mat[r0:r1, c0:c1]
+        t = t[r0:r1, c0:c1]
+        burn = burn[r0:r1, c0:c1]
+        life = life[r0:r1, c0:c1]
+        oy += r0
+        ox += c0
         # sources clamp temperature
         t[mat == M.LAVA] = 900.0
         np.maximum(t, 380.0, where=(mat == M.FIRE), out=t)
@@ -739,7 +797,7 @@ class World:
             self._wake_cool -= 1
             box = self._cool_box
         elif box is not None:
-            self._wake_cool = 6
+            self._wake_cool = 10
             self._cool_box = list(box)
         if box is not None:
             y0 = max(0, box[0] - self.MARGIN)
@@ -766,8 +824,8 @@ class World:
             for s in range(SIM_SUBSTEPS):
                 self.v_moved[:] = 0
                 parity = (self.tick + s) % 2 == 0
-                moves += self._powder_pass(parity)
-                moves += self._liquid_pass(parity)
+                moves += self._powder_pass(parity, lateral=(s == 0))
+                moves += self._liquid_pass(parity, lateral=(s == 0))
             self.v_moved[:] = 0
             moves += self._gas_pass(self.tick % 2 == 0)
             # every fluid cell ages toward rest; real flow resets the clock
