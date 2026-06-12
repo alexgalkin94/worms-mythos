@@ -391,6 +391,10 @@ class World:
         self.level_until = self.tick + 120
 
     def _liquid_pass(self, parity, lateral=True):
+        """Generator: yields at the block boundaries (gravity | pressure
+        solver+teleport | pour/creep) so the sandbox frame budget can cut
+        between them. Op order is identical to the old monolith — callers
+        that drain it in one go are bit-identical."""
         """Vertical work (falling, sinking, slumping) runs every substep;
         the expensive lateral machinery — hydrostatic flow, pours, flat
         slosh, surface levelling — only needs one pass per tick."""
@@ -470,6 +474,7 @@ class World:
             if n:
                 self._mark_level_work(real_work)
             return n + n_sink
+        yield                    # slice boundary: gravity block done
         # ---- communicating vessels: the hydrostatic HEAD plane ----------
         # head[cell] = y of the highest water surface connected to this
         # cell through liquid, min-propagated 6 steps per tick on a
@@ -570,6 +575,7 @@ class World:
                         np.bitwise_or(hdw, brw, out=hdw)
                         np.minimum(hdw[:, :-1], hdw[:, 1:], out=hdw[:, :-1])
                         np.bitwise_or(hdw, brw, out=hdw)
+            yield                # slice boundary: min-sweeps done
             # crop the extended window back to the region for the rules
             oy, ox = ry0 - ey0, rx0 - ex0
             hd = hde[oy:oy + (ry1 - ry0), ox:ox + (rx1 - rx0)]
@@ -593,6 +599,7 @@ class World:
                     n += round_n
                     if not round_n:      # quiet round: round 2 won't differ
                         break
+            yield                # slice boundary: sweeps + flow done
             # ---- pressure teleport (the Dwarf Fortress trick) ----------
             # Fluid under pressure doesn't crawl cell by cell: the top
             # cell of a body's HIGH surface jumps straight to the lowest
@@ -647,6 +654,7 @@ class World:
                     real_work[sy_, sx_] = True
                     real_work[ty_, tx_] = True
                     n += len(sy_)
+        yield                    # slice boundary: solver + teleport done
         # lateral flow. Pouring over an edge is real flow (always allowed,
         # resets rest); sloshing on flat ground is gated by the rest counter
         # so big pools go to sleep instead of jittering forever.
@@ -1250,7 +1258,9 @@ class World:
                 self.v_phm[...] = self.v_phase    # nothing moved yet
                 parity = (self.tick + s) % 2 == 0
                 moves += self._powder_pass(parity, lateral=(s == 0))
-                moves += self._liquid_pass(parity, lateral=(s == 0))
+                yield            # slice boundary: powder done
+                moves += yield from self._liquid_pass(
+                    parity, lateral=(s == 0))
                 yield                     # slice boundary: one substep done
             self.v_phm[...] = self.v_phase
             moves += self._gas_pass(self.tick % 2 == 0)
