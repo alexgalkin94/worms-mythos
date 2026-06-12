@@ -429,6 +429,11 @@ class World:
         mb = shift(m, g, 0, 0.0)
         dn = np.clip(self._stable_bottom(m + mb) - mb, 0.0, m) * ratem
         dn[~(carry & self._bshift(open_, g, 0))] = 0.0
+        # only substantial cells drip: sub-visible residue freezes in
+        # place as inert conserved mass instead of running the eternal
+        # bubble micro-cycle (up lifts a crumb, dn drips it back) that
+        # kept every noise-pocket on procedural maps awake forever
+        dn[m < np.float32(0.15)] = 0.0
         # SIDEWAYS: equalize with each neighbour by a quarter of the gap.
         # Thin films stop creeping below LMIN_SEE so pools don't smear out
         # into invisible sheets across the whole map. Lateral diffusion
